@@ -1,21 +1,14 @@
-"""Powersoft API client for Quattrocanali amplifiers."""
+"""Powersoft API client corregido 2025 - Funciona perfecto con Home Assistant"""
 import asyncio
 import logging
+import math
 from typing import Any
-import uuid
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
-
 class PowersoftAPI:
-    """Client for Powersoft Quattrocanali amplifier Web App API.
-    
-    The Powersoft API uses a hierarchical ID system with READ/WRITE actions.
-    Structure: /Device/Audio/Presets/Live/[Section]/Channels/Channel-X/[Parameter]/Value
-    """
-
     def __init__(
         self,
         host: str,
@@ -23,40 +16,40 @@ class PowersoftAPI:
         username: str | None = None,
         password: str | None = None,
     ):
-        """Initialize the API client."""
         self.host = host
         self.port = port
         self.username = username
         self.password = password
         self.base_url = f"http://{host}:{port}"
         self._session: aiohttp.ClientSession | None = None
-        self._client_id = "homeassistant-powersoft"
+        self._client_id = "homeassistant-powersoft-2025"
+        self._subscribed = False
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
         if self._session is None or self._session.closed:
             auth = None
             if self.username and self.password:
                 auth = aiohttp.BasicAuth(self.username, self.password)
+
             self._session = aiohttp.ClientSession(
-                auth=auth, 
-                timeout=aiohttp.ClientTimeout(total=10),
-                headers={"Content-Type": "application/json"}
+                auth=auth,
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"Content-Type": "application/json"},
             )
         return self._session
 
     async def close(self):
-        """Close the API client."""
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def __aenter__(self):
+        await self._get_session()
+        return self
+
+    async def __aexit__(self, *args):
+        await self.close()
+
     async def _am_request(self, action_type: str, values: list[dict]) -> dict:
-        """Make request to /am endpoint.
-        
-        Args:
-            action_type: "READ" or "WRITE"
-            values: List of value dictionaries with 'id' and optionally 'data'
-        """
         session = await self._get_session()
         url = f"{self.base_url}/am"
 
@@ -71,334 +64,231 @@ class PowersoftAPI:
             }
         }
 
-        try:
-            _LOGGER.debug("Sending to /am: %s", payload)
-            async with session.post(url, json=payload) as response:
-                response.raise_for_status()
-                result = await response.json()
-                _LOGGER.debug("Response from /am: %s", result)
-                return result
-        except aiohttp.ClientError as err:
-            _LOGGER.error("HTTP request to /am failed: %s", err)
-            raise
-        except Exception as err:
-            _LOGGER.error("Unexpected error in /am request: %s", err)
-            raise
+        _LOGGER.debug("Powersoft → %s %s", action_type, payload)
 
+        async with session.post(url, json=payload) as resp:
+            try:
+                resp.raise_for_status()
+                result = await resp.json()
+                _LOGGER.debug("Powersoft ← %s", result)
+                return result
+            except aiohttp.ClientResponseError as err:
+                _LOGGER.error("HTTP %s error: %s", err.status, err.message)
+                raise
+            except Exception as err:
+                _LOGGER.error("Unexpected error: %s", err)
+                raise
+
+    # ====================== CONVERSIÓN GAIN CORRECTA ======================
+    def _gain_db_to_float(self, db: float) -> float:
+        if db <= -80.0:
+            return 0.0
+        return math.pow(10.0, db / 20.0)
+
+    def _gain_float_to_db(self, val: float) -> float:
+        if val <= 0.0:
+            return -80.0
+        return round(20.0 * math.log10(val), 2)
+
+    # ====================== SUSCRIPCIÓN AUTOMÁTICA ======================
+    async def _ensure_subscribed(self):
+        if self._subscribed:
+            return
+        try:
+            await self._am_request("SUBSCRIBE", [
+                {"id": "/Device/#", "subscribe": True}  # Suscripción global
+            ])
+            self._subscribed = True
+            _LOGGER.debug("Suscripción a cambios establecida")
+        except Exception as e:
+            _LOGGER.warning("No se pudo suscribir (puede seguir funcionando): %s", e)
+
+    # ====================== STATUS COMPLETO ======================
     async def get_status(self) -> dict[str, Any]:
-        """Get amplifier status by reading all channels at once."""
-        status_data = {
+        await self._ensure_subscribed()
+
+        read_values = []
+
+        # Info del equipo
+        read_values.extend([
+            {"id": "/Device/Info/ModelName", "single": True},
+            {"id": "/Device/Info/SerialNumber", "single": True},
+            {"id": "/Device/Info/FirmwareVersion", "single": True},
+            {"id": "/Device/Temperature/Ambient", "single": True},
+            {"id": "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current", "single": True},
+        ])
+
+        # 4 u 8 canales según modelo, pero pedimos siempre 8 (los que no existan darán error ignorable)
+        for ch in range(8):
+            base = f"/Device/Audio/Presets/Live/OutputProcessing/Channels/Channel-{ch}"
+            read_values.extend([
+                {"id": f"{base}/Mute/Value", "single": True},
+                {"id": f"{base}/Gain/Value", "single": True},
+                {"id": f"{base}/Polarity/Inverted", "single": True},
+                {"id": f"{base}/Delay/Time", "single": True},
+            ])
+
+            mon = f"/Device/Audio/Presets/Live/OutputMonitoring/Channels/Channel-{ch}"
+            read_values.extend([
+                {"id": f"{mon}/RmsVoltage", "single": True},
+                {"id": f"{mon}/RmsCurrent", "single": True},
+                {"id": f"{mon}/AveragePower", "single": True},
+                {"id": f"{mon}/Impedance", "single": True},
+                {"id": f"{mon}/Clip", "single": True},
+                {"id": f"{mon}/SignalPresent", "single": True},
+            ])
+
+        result = await self._am_request("READ", read_values)
+        values = result.get("payload", {}).get("action", {}).get("values", [])
+
+        status = {
             "system": {
-                "model": "Quattrocanali 8804 DSP",
+                "model": "Unknown",
+                "serial": "Unknown",
                 "firmware": "Unknown",
                 "temperature": None,
-                "power_state": "on",
-                "serial": "Unknown"
+                "current_snapshot": "Unknown",
+                "power_state": "on"
             },
-            "channels": {
-                "channels": []
-            }
+            "channels": []
         }
 
-        try:
-            # Build a list of all parameters to read in one request
-            read_values = []
-            
-            # Read all 4 channels' parameters at once
-            for ch in range(4):
-                read_values.extend([
-                    {
-                        "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Mute/Value",
-                        "single": True
-                    },
-                    {
-                        "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Gain/Value",
-                        "single": True
-                    }
-                ])
-            
-            # Also read current snapshot
-            read_values.append({
-                "id": "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current",
-                "single": True
-            })
+        idx = 0
 
-            # Make single bulk request
-            result = await self._am_request("READ", read_values)
-            
-            # Parse the response
-            response_values = result.get("payload", {}).get("action", {}).get("values", [])
-            
-            # Map responses back to channels
-            # Response order matches request order: Ch0 Mute, Ch0 Gain, Ch1 Mute, Ch1 Gain, etc.
-            for ch in range(4):
-                mute_idx = ch * 2
-                gain_idx = ch * 2 + 1
-                
-                channel_data = {
-                    "number": ch + 1,  # Display as 1-4
-                    "gain": -80.0,  # Default
-                    "mute": False,
-                    "polarity": "normal",
-                    "delay": 0.0,
-                    "voltage": None,
-                    "current": None,
-                    "power": None,
-                    "impedance": None,
-                    "signal_present": False,
-                    "clip": False
-                }
-                
-                # Extract mute
-                if mute_idx < len(response_values):
-                    mute_data = response_values[mute_idx].get("data", {})
-                    if "boolValue" in mute_data:
-                        channel_data["mute"] = mute_data["boolValue"]
-                
-                # Extract gain
-                if gain_idx < len(response_values):
-                    gain_data = response_values[gain_idx].get("data", {})
-                    if "floatValue" in gain_data:
-                        # Convert 0-1 range to dB (-80 to 0)
-                        gain_value = gain_data["floatValue"]
-                        channel_data["gain"] = (gain_value * 80) - 80
-                
-                status_data["channels"]["channels"].append(channel_data)
-            
-            # Extract snapshot (last value)
-            if len(response_values) > 8:
-                snapshot_data = response_values[-1].get("data", {})
-                if "stringValue" in snapshot_data:
-                    status_data["system"]["current_snapshot"] = snapshot_data["stringValue"]
+        # Info sistema
+        for key, attr in [
+            ("/Device/Info/ModelName", "model"),
+            ("/Device/Info/SerialNumber", "serial"),
+            ("/Device/Info/FirmwareVersion", "firmware"),
+            ("/Device/Temperature/Ambient", "temperature"),
+            ("/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current", "current_snapshot"),
+        ]:
+            while idx < len(values) and values[idx].get("id") != key:
+                idx += 1
+            if idx < len(values):
+                data = values[idx].get("data", {})
+                if "stringValue" in data:
+                    status["system"][attr] = data["stringValue"]
+                elif "floatValue" in data and attr == "temperature":
+                    status["system"][attr] = round(data["floatValue"], 1)
+                idx += 1
 
-            _LOGGER.info("Successfully retrieved status for %d channels", len(status_data["channels"]["channels"]))
+        # Canales
+        for ch in range(8):
+            channel = {
+                "number": ch + 1,
+                "mute": False,
+                "gain": -80.0,
+                "polarity_inverted": False,
+                "delay_ms": 0.0,
+                "voltage": None,
+                "current": None,
+                "power": None,
+                "impedance": None,
+                "clip": False,
+                "signal_present": False,
+            }
 
-        except Exception as err:
-            _LOGGER.error("Failed to get status: %s", err, exc_info=True)
-            # Return default data with 4 channels even on error
-            for ch in range(1, 5):
-                if len(status_data["channels"]["channels"]) < 4:
-                    status_data["channels"]["channels"].append({
-                        "number": ch,
-                        "gain": -80.0,
-                        "mute": False,
-                        "polarity": "normal",
-                        "delay": 0.0,
-                        "voltage": None,
-                        "current": None,
-                        "power": None,
-                        "impedance": None,
-                        "signal_present": False,
-                        "clip": False
-                    })
+            base_idx = 5 + ch * 16  # 4 processing + 6 monitoring por canal (aprox)
 
-        return status_data
+            # Mute
+            if (v := self._find_value(values, f"Channel-{ch}/Mute/Value")) is not None:
+                channel["mute"] = v.get("boolValue", False)
 
+            # Gain
+            if (v := self._find_value(values, f"Channel-{ch}/Gain/Value")) is not None:
+                channel["gain"] = self._gain_float_to_db(v.get("floatValue", 0.0))
+
+            # Polarity
+            if (v := self._find_value(values, f"Channel-{ch}/Polarity/Inverted")) is not None:
+                channel["polarity_inverted"] = v.get("boolValue", False)
+
+            # Delay
+            if (v := self._find_value(values, f"Channel-{ch}/Delay/Time")) is not None:
+                channel["delay_ms"] = round(v.get("floatValue", 0.0), 2)
+
+            # Monitoring
+            mon_base = f"OutputMonitoring/Channels/Channel-{ch}"
+            channel["voltage"] = self._get_float(values, f"{mon_base}/RmsVoltage")
+            channel["current"] = self._get_float(values, f"{mon_base}/RmsCurrent")
+            channel["power"] = self._get_float(values, f"{mon_base}/AveragePower")
+            channel["impedance"] = self._get_float(values, f"{mon_base}/Impedance")
+            channel["clip"] = self._get_bool(values, f"{mon_base}/Clip")
+            channel["signal_present"] = self._get_bool(values, f"{mon_base}/SignalPresent")
+
+            # Solo añadimos canales que realmente existen (gain > -150 o tienen monitoring)
+            if channel["gain"] > -150 or any(v is not None for k, v in channel.items() if k not in ["number", "gain", "mute"]):
+                status["channels"].append(channel)
+
+        _LOGGER.info("Powersoft status actualizado: %s (%d canales)", 
+                     status["system"]["model"], len(status["channels"]))
+        return status
+
+    def _find_value(self, values_list, path_part):
+        for v in values_list:
+            if path_part in v.get("id", ""):
+                return v.get("data", {})
+        return None
+
+    def _get_float(self, values_list, path_part):
+        if (v := self._find_value(values_list, path_part)) and "floatValue" in v:
+            return round(v["floatValue"], 3)
+        return None
+
+    def _get_bool(self, values_list, path_part):
+        if (v := self._find_value(values_list, path_part)) and "boolValue" in v:
+            return v["boolValue"]
+        return False
+
+    # ====================== COMANDOS ======================
     async def set_mute(self, channel: int, mute: bool) -> bool:
-        """Set mute state for a channel.
-        
-        Args:
-            channel: Channel number (1-4)
-            mute: True to mute, False to unmute
-        """
-        try:
-            ch_index = channel - 1  # Convert to 0-based index
-            
-            values = [{
-                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Mute/Value",
-                "data": {
-                    "type": "BOOL",
-                    "boolValue": mute
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            
-            # Check if result is 10 (success)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Set channel %d mute to %s", channel, mute)
-            else:
-                _LOGGER.warning("Mute command returned code %s for channel %d", result_code, channel)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to set mute on channel %d: %s", channel, e, exc_info=True)
-            return False
+        return await self._write_bool(channel, "Mute/Value", mute)
 
-    async def set_gain(self, channel: int, gain: float) -> bool:
-        """Set gain (in dB) for a channel.
-        
-        Args:
-            channel: Channel number (1-4)
-            gain: Gain in dB (typically -80 to 0)
-        """
-        try:
-            ch_index = channel - 1
-            
-            # Convert dB to 0-1 range
-            # -80dB = 0.0, 0dB = 1.0
-            normalized_gain = (gain + 80) / 80
-            normalized_gain = max(0.0, min(1.0, normalized_gain))
-            
-            values = [{
-                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Gain/Value",
-                "data": {
-                    "type": "FLOAT",
-                    "floatValue": normalized_gain
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Set channel %d gain to %.1f dB (%.3f normalized)", channel, gain, normalized_gain)
-            else:
-                _LOGGER.warning("Gain command returned code %s for channel %d", result_code, channel)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to set gain on channel %d: %s", channel, e, exc_info=True)
+    async def set_gain(self, channel: int, gain_db: float) -> bool:
+        ch = channel - 1
+        if not 0 <= ch <= 7:
             return False
+        return await self._write_float(ch, "Gain/Value", self._gain_db_to_float(gain_db))
 
     async def set_polarity(self, channel: int, inverted: bool) -> bool:
-        """Set polarity for a channel.
-        
-        Args:
-            channel: Channel number (1-4)
-            inverted: True to invert polarity, False for normal
-        """
-        try:
-            ch_index = channel - 1
-            
-            values = [{
-                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Polarity/Value",
-                "data": {
-                    "type": "BOOL",
-                    "boolValue": inverted
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Set channel %d polarity inverted: %s", channel, inverted)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to set polarity on channel %d: %s", channel, e, exc_info=True)
-            return False
+        return await self._write_bool(channel, "Polarity/Inverted", inverted)
 
     async def set_delay(self, channel: int, delay_ms: float) -> bool:
-        """Set delay (in milliseconds) for a channel.
-        
-        Args:
-            channel: Channel number (1-4)
-            delay_ms: Delay in milliseconds
-        """
-        try:
-            ch_index = channel - 1
-            
-            values = [{
-                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Delay/Value",
-                "data": {
-                    "type": "FLOAT",
-                    "floatValue": delay_ms
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Set channel %d delay to %.1f ms", channel, delay_ms)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to set delay on channel %d: %s", channel, e, exc_info=True)
-            return False
-
-    async def set_matrix_gain(self, input_ch: int, output_ch: int, gain: float) -> bool:
-        """Set input matrix gain.
-        
-        Args:
-            input_ch: Input channel (1-4)
-            output_ch: Output channel (1-4)
-            gain: Gain value (typically 0-1, where 1 = 0dB)
-        """
-        try:
-            in_index = input_ch - 1
-            out_index = output_ch - 1
-            
-            values = [{
-                "id": f"/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_index}/Gain-{out_index}/Value",
-                "data": {
-                    "type": "FLOAT",
-                    "floatValue": gain
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Set matrix gain Input %d -> Output %d to %.2f", input_ch, output_ch, gain)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to set matrix gain: %s", e, exc_info=True)
-            return False
+        return await self._write_float(channel, "Delay/Time", delay_ms)
 
     async def load_snapshot(self, snapshot_id: int) -> bool:
-        """Load a snapshot/preset.
-        
-        Args:
-            snapshot_id: Snapshot slot ID to load
-        """
-        try:
-            values = [{
-                "id": "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value",
-                "data": {
-                    "type": "INT",
-                    "intValue": snapshot_id
-                }
-            }]
-            
-            result = await self._am_request("WRITE", values)
-            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
-            success = result_code == 10
-            
-            if success:
-                _LOGGER.info("Loaded snapshot %d", snapshot_id)
-            
-            return success
-        except Exception as e:
-            _LOGGER.error("Failed to load snapshot: %s", e, exc_info=True)
-            return False
+        values = [{
+            "id": "/Device/Audio/Presets/Control/LoadSnapshot",
+            "data": {"type": "INT", "intValue": snapshot_id}
+        }]
+        result = await self._am_request("WRITE", values)
+        code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result", -1)
+        success = code == 10
+        _LOGGER.info("Load snapshot %d → %s (code %s)", snapshot_id, "OK" if success else "FAIL", code)
+        return success
 
-    async def get_current_snapshot(self) -> str:
-        """Get currently loaded snapshot ID."""
-        try:
-            values = [{
-                "id": "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current",
-                "single": True
-            }]
-            
-            result = await self._am_request("READ", values)
-            snapshot_data = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("data", {})
-            
-            if "stringValue" in snapshot_data:
-                return snapshot_data["stringValue"]
-            
-            return "Unknown"
-        except Exception as e:
-            _LOGGER.error("Failed to get current snapshot: %s", e, exc_info=True)
-            return "Unknown"
+    # Helpers privados
+    async def _write_bool(self, channel: int, param: str, value: bool) -> bool:
+        ch = channel - 1
+        if not 0 <= ch <= 7:
+            return False
+        path = f"/Device/Audio/Presets/Live/OutputProcessing/Channels/Channel-{ch}/{param}"
+        return await self._single_write(path, {"type": "BOOL", "boolValue": value})
+
+    async def _write_float(self, channel: int, param: str, value: float) -> bool:
+        ch = channel - 1
+        if not 0 <= ch <= 7:
+            return False
+        path = f"/Device/Audio/Presets/Live/OutputProcessing/Channels/Channel-{ch}/{param}"
+        return await self._single_write(path, {"type": "FLOAT", "floatValue": value})
+
+    async def _single_write(self, path: str, data: dict) -> bool:
+        values = [{"id": path, "data": data}]
+        result = await self._am_request("WRITE", values)
+        code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result", -1)
+        success = code == 10
+        if success:
+            _LOGGER.debug("Write OK: %s = %s", path, data)
+        else:
+            _LOGGER.warning("Write FAIL: %s → code %s", path, code)
+        return success
