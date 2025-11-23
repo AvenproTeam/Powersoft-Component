@@ -2,6 +2,7 @@
 import asyncio
 import logging
 from typing import Any
+import uuid
 
 import aiohttp
 
@@ -9,7 +10,11 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class PowersoftAPI:
-    """Client for Powersoft Quattrocanali amplifier Web App API."""
+    """Client for Powersoft Quattrocanali amplifier Web App API.
+    
+    The Powersoft API uses a hierarchical ID system with READ/WRITE actions.
+    Structure: /Device/Audio/Presets/Live/[Section]/Channels/Channel-X/[Parameter]/Value
+    """
 
     def __init__(
         self,
@@ -25,6 +30,7 @@ class PowersoftAPI:
         self.password = password
         self.base_url = f"http://{host}:{port}"
         self._session: aiohttp.ClientSession | None = None
+        self._client_id = "homeassistant-powersoft"
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -32,7 +38,11 @@ class PowersoftAPI:
             auth = None
             if self.username and self.password:
                 auth = aiohttp.BasicAuth(self.username, self.password)
-            self._session = aiohttp.ClientSession(auth=auth, timeout=aiohttp.ClientTimeout(total=10))
+            self._session = aiohttp.ClientSession(
+                auth=auth, 
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Content-Type": "application/json"}
+            )
         return self._session
 
     async def close(self):
@@ -40,35 +50,104 @@ class PowersoftAPI:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def _http_request(
-        self, endpoint: str, method: str = "GET", data: dict | None = None
-    ) -> dict | str:
-        """Make HTTP request to the amplifier."""
+    async def _am_request(self, action_type: str, values: list[dict]) -> dict:
+        """Make request to /am endpoint.
+        
+        Args:
+            action_type: "READ" or "WRITE"
+            values: List of value dictionaries with 'id' and optionally 'data'
+        """
         session = await self._get_session()
-        url = f"{self.base_url}{endpoint}"
+        url = f"{self.base_url}/am"
+
+        payload = {
+            "clientId": self._client_id,
+            "payload": {
+                "type": "ACTION",
+                "action": {
+                    "type": action_type,
+                    "values": values
+                }
+            }
+        }
 
         try:
-            async with session.request(method, url, json=data) as response:
+            _LOGGER.debug("Sending to /am: %s", payload)
+            async with session.post(url, json=payload) as response:
                 response.raise_for_status()
-                content_type = response.headers.get('Content-Type', '')
-                
-                if 'application/json' in content_type:
-                    return await response.json()
-                else:
-                    return await response.text()
+                result = await response.json()
+                _LOGGER.debug("Response from /am: %s", result)
+                return result
         except aiohttp.ClientError as err:
-            _LOGGER.error("HTTP request to %s failed: %s", url, err)
+            _LOGGER.error("HTTP request to /am failed: %s", err)
             raise
         except Exception as err:
-            _LOGGER.error("Unexpected error in HTTP request: %s", err)
+            _LOGGER.error("Unexpected error in /am request: %s", err)
             raise
 
-    async def get_status(self) -> dict[str, Any]:
-        """Get amplifier status.
+    async def _read_value(self, param_id: str) -> Any:
+        """Read a single value from the amplifier."""
+        values = [{"id": param_id, "single": True}]
+        result = await self._am_request("READ", values)
         
-        This method tries different common endpoints for Powersoft amplifiers.
-        The exact API endpoints vary by model and firmware version.
+        try:
+            value_data = result["payload"]["action"]["values"][0]["data"]
+            
+            # Extract value based on type
+            if "boolValue" in value_data:
+                return value_data["boolValue"]
+            elif "floatValue" in value_data:
+                return value_data["floatValue"]
+            elif "intValue" in value_data:
+                return value_data["intValue"]
+            elif "stringValue" in value_data:
+                return value_data["stringValue"]
+            
+            return None
+        except (KeyError, IndexError) as e:
+            _LOGGER.error("Failed to parse read response: %s", e)
+            return None
+
+    async def _write_value(self, param_id: str, value: Any, value_type: str) -> bool:
+        """Write a single value to the amplifier.
+        
+        Args:
+            param_id: Parameter ID path
+            value: Value to write
+            value_type: "BOOL", "FLOAT", "INT", or "STRING"
         """
+        # Map value_type to the correct key
+        value_key_map = {
+            "BOOL": "boolValue",
+            "FLOAT": "floatValue",
+            "INT": "intValue",
+            "STRING": "stringValue"
+        }
+        
+        value_key = value_key_map.get(value_type)
+        if not value_key:
+            _LOGGER.error("Invalid value type: %s", value_type)
+            return False
+
+        values = [{
+            "id": param_id,
+            "data": {
+                "type": value_type,
+                value_key: value
+            }
+        }]
+        
+        try:
+            result = await self._am_request("WRITE", values)
+            # Check if result is 10 (success)
+            result_code = result["payload"]["action"]["values"][0].get("result")
+            return result_code == 10
+        except Exception as e:
+            _LOGGER.error("Failed to write value: %s", e)
+            return False
+
+    async def get_status(self) -> dict[str, Any]:
+        """Get amplifier status."""
         status_data = {
             "system": {
                 "model": "Quattrocanali 8804 DSP",
@@ -83,38 +162,23 @@ class PowersoftAPI:
         }
 
         try:
-            # Try to get system/device information
+            # Read current snapshot
             try:
-                # Common endpoints for Powersoft Web App
-                device_info = await self._http_request("/device/info")
-                if isinstance(device_info, dict):
-                    status_data["system"].update({
-                        "model": device_info.get("model", "Quattrocanali 8804 DSP"),
-                        "firmware": device_info.get("firmware", device_info.get("fw_version", "Unknown")),
-                        "serial": device_info.get("serial", device_info.get("serial_number", "Unknown"))
-                    })
-                    _LOGGER.info("Got device info: %s", device_info)
+                current_snapshot = await self._read_value(
+                    "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
+                )
+                status_data["system"]["current_snapshot"] = current_snapshot
             except Exception as e:
-                _LOGGER.debug("Could not get /device/info: %s", e)
+                _LOGGER.debug("Could not read current snapshot: %s", e)
 
-            # Try to get temperature/monitoring data
-            try:
-                monitoring = await self._http_request("/monitoring")
-                if isinstance(monitoring, dict):
-                    status_data["system"]["temperature"] = monitoring.get("temperature", monitoring.get("temp"))
-                    _LOGGER.info("Got monitoring data: %s", monitoring)
-            except Exception as e:
-                _LOGGER.debug("Could not get /monitoring: %s", e)
-
-            # Try to get channels information
-            # Quattrocanali has 4 channels
-            for ch in range(1, 5):
+            # Quattrocanali 8804 has 4 output channels (Channel-0 to Channel-3)
+            for ch in range(4):
                 channel_data = {
-                    "number": ch,
-                    "gain": -20.0,
+                    "number": ch + 1,  # Display as 1-4
+                    "gain": None,
                     "mute": False,
                     "polarity": "normal",
-                    "delay": 0.0,
+                    "delay": None,
                     "voltage": None,
                     "current": None,
                     "power": None,
@@ -124,149 +188,156 @@ class PowersoftAPI:
                 }
                 
                 try:
-                    # Try to get individual channel data
-                    ch_info = await self._http_request(f"/channel/{ch}")
-                    if isinstance(ch_info, dict):
-                        channel_data.update({
-                            "gain": ch_info.get("gain", channel_data["gain"]),
-                            "mute": ch_info.get("mute", channel_data["mute"]),
-                            "polarity": "inverted" if ch_info.get("polarity_inverted") else "normal",
-                            "delay": ch_info.get("delay", channel_data["delay"]),
-                        })
-                        _LOGGER.info("Got channel %d data: %s", ch, ch_info)
+                    # Read mute status
+                    mute = await self._read_value(
+                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Mute/Value"
+                    )
+                    if mute is not None:
+                        channel_data["mute"] = mute
                 except Exception as e:
-                    _LOGGER.debug("Could not get channel %d info: %s", ch, e)
+                    _LOGGER.debug("Could not read mute for channel %d: %s", ch, e)
 
                 try:
-                    # Try to get channel metering/monitoring
-                    ch_meter = await self._http_request(f"/channel/{ch}/meter")
-                    if isinstance(ch_meter, dict):
-                        channel_data.update({
-                            "voltage": ch_meter.get("voltage", ch_meter.get("volt")),
-                            "current": ch_meter.get("current", ch_meter.get("amp")),
-                            "power": ch_meter.get("power", ch_meter.get("watt")),
-                            "impedance": ch_meter.get("impedance", ch_meter.get("ohm")),
-                            "clip": ch_meter.get("clip", False),
-                            "signal_present": ch_meter.get("signal", ch_meter.get("signal_present", False))
-                        })
-                        _LOGGER.info("Got channel %d metering: %s", ch, ch_meter)
+                    # Read gain (output level)
+                    gain = await self._read_value(
+                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Gain/Value"
+                    )
+                    if gain is not None:
+                        # Convert to dB if needed (assuming 0-1 range = -80 to 0 dB)
+                        channel_data["gain"] = (gain * 80) - 80 if gain <= 1 else gain
                 except Exception as e:
-                    _LOGGER.debug("Could not get channel %d metering: %s", ch, e)
+                    _LOGGER.debug("Could not read gain for channel %d: %s", ch, e)
+
+                try:
+                    # Read polarity
+                    polarity = await self._read_value(
+                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Polarity/Value"
+                    )
+                    if polarity is not None:
+                        channel_data["polarity"] = "inverted" if polarity else "normal"
+                except Exception as e:
+                    _LOGGER.debug("Could not read polarity for channel %d: %s", ch, e)
+
+                try:
+                    # Read delay
+                    delay = await self._read_value(
+                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Delay/Value"
+                    )
+                    if delay is not None:
+                        channel_data["delay"] = delay
+                except Exception as e:
+                    _LOGGER.debug("Could not read delay for channel %d: %s", ch, e)
 
                 status_data["channels"]["channels"].append(channel_data)
 
         except Exception as err:
             _LOGGER.error("Failed to get complete status: %s", err)
-            # Return partial data even if some requests failed
 
-        _LOGGER.info("Final status data: %s", status_data)
+        _LOGGER.info("Status data retrieved: %d channels", len(status_data["channels"]["channels"]))
         return status_data
 
-    async def get_channel_info(self, channel: int) -> dict[str, Any]:
-        """Get information for a specific channel."""
-        try:
-            return await self._http_request(f"/channel/{channel}")
-        except Exception as e:
-            _LOGGER.error("Failed to get channel %d info: %s", channel, e)
-            return {}
-
     async def set_mute(self, channel: int, mute: bool) -> bool:
-        """Set mute state for a channel."""
-        try:
-            await self._http_request(
-                f"/channel/{channel}/mute",
-                method="POST",
-                data={"mute": mute},
-            )
+        """Set mute state for a channel.
+        
+        Args:
+            channel: Channel number (1-4)
+            mute: True to mute, False to unmute
+        """
+        ch_index = channel - 1  # Convert to 0-based index
+        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Mute/Value"
+        
+        success = await self._write_value(param_id, mute, "BOOL")
+        if success:
             _LOGGER.info("Set channel %d mute to %s", channel, mute)
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to set mute on channel %d: %s", channel, err)
-            return False
+        return success
 
     async def set_gain(self, channel: int, gain: float) -> bool:
-        """Set gain (in dB) for a channel."""
-        try:
-            await self._http_request(
-                f"/channel/{channel}/gain",
-                method="POST",
-                data={"gain": gain},
-            )
+        """Set gain (in dB) for a channel.
+        
+        Args:
+            channel: Channel number (1-4)
+            gain: Gain in dB (typically -80 to 0)
+        """
+        ch_index = channel - 1
+        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Gain/Value"
+        
+        # Convert dB to 0-1 range if the API expects that
+        # Assuming -80dB = 0.0, 0dB = 1.0
+        normalized_gain = (gain + 80) / 80
+        normalized_gain = max(0.0, min(1.0, normalized_gain))
+        
+        success = await self._write_value(param_id, normalized_gain, "FLOAT")
+        if success:
             _LOGGER.info("Set channel %d gain to %.1f dB", channel, gain)
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to set gain on channel %d: %s", channel, err)
-            return False
+        return success
 
     async def set_polarity(self, channel: int, inverted: bool) -> bool:
-        """Set polarity for a channel."""
-        try:
-            await self._http_request(
-                f"/channel/{channel}/polarity",
-                method="POST",
-                data={"inverted": inverted},
-            )
+        """Set polarity for a channel.
+        
+        Args:
+            channel: Channel number (1-4)
+            inverted: True to invert polarity, False for normal
+        """
+        ch_index = channel - 1
+        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Polarity/Value"
+        
+        success = await self._write_value(param_id, inverted, "BOOL")
+        if success:
             _LOGGER.info("Set channel %d polarity inverted: %s", channel, inverted)
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to set polarity on channel %d: %s", channel, err)
-            return False
+        return success
 
     async def set_delay(self, channel: int, delay_ms: float) -> bool:
-        """Set delay (in milliseconds) for a channel."""
-        try:
-            await self._http_request(
-                f"/channel/{channel}/delay",
-                method="POST",
-                data={"delay": delay_ms},
-            )
+        """Set delay (in milliseconds) for a channel.
+        
+        Args:
+            channel: Channel number (1-4)
+            delay_ms: Delay in milliseconds
+        """
+        ch_index = channel - 1
+        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Delay/Value"
+        
+        success = await self._write_value(param_id, delay_ms, "FLOAT")
+        if success:
             _LOGGER.info("Set channel %d delay to %.1f ms", channel, delay_ms)
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to set delay on channel %d: %s", channel, err)
-            return False
+        return success
 
-    async def power_on(self) -> bool:
-        """Power on the amplifier."""
-        try:
-            await self._http_request("/power", method="POST", data={"state": "on"})
-            _LOGGER.info("Powered on amplifier")
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to power on: %s", err)
-            return False
-
-    async def power_off(self) -> bool:
-        """Power off the amplifier (standby mode)."""
-        try:
-            await self._http_request("/power", method="POST", data={"state": "off"})
-            _LOGGER.info("Powered off amplifier")
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to power off: %s", err)
-            return False
+    async def set_matrix_gain(self, input_ch: int, output_ch: int, gain: float) -> bool:
+        """Set input matrix gain.
+        
+        Args:
+            input_ch: Input channel (1-4)
+            output_ch: Output channel (1-4)
+            gain: Gain value (typically 0-1, where 1 = 0dB)
+        """
+        in_index = input_ch - 1
+        out_index = output_ch - 1
+        param_id = f"/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_index}/Gain-{out_index}/Value"
+        
+        success = await self._write_value(param_id, gain, "FLOAT")
+        if success:
+            _LOGGER.info("Set matrix gain Input %d -> Output %d to %.2f", input_ch, output_ch, gain)
+        return success
 
     async def load_snapshot(self, snapshot_id: int) -> bool:
-        """Load a snapshot/preset."""
-        try:
-            await self._http_request(
-                "/snapshot/load",
-                method="POST",
-                data={"snapshot": snapshot_id},
-            )
+        """Load a snapshot/preset.
+        
+        Args:
+            snapshot_id: Snapshot slot ID to load
+        """
+        param_id = "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value"
+        
+        success = await self._write_value(param_id, snapshot_id, "INT")
+        if success:
             _LOGGER.info("Loaded snapshot %d", snapshot_id)
-            return True
-        except Exception as err:
-            _LOGGER.error("Failed to load snapshot: %s", err)
-            return False
+        return success
 
-    async def get_snapshots(self) -> list[dict]:
-        """Get available snapshots."""
+    async def get_current_snapshot(self) -> str:
+        """Get currently loaded snapshot ID."""
         try:
-            response = await self._http_request("/snapshots")
-            if isinstance(response, dict):
-                return response.get("snapshots", [])
-            return []
-        except Exception as err:
-            _LOGGER.error("Failed to get snapshots: %s", err)
-            return []
+            snapshot_id = await self._read_value(
+                "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
+            )
+            return snapshot_id if snapshot_id else "Unknown"
+        except Exception as e:
+            _LOGGER.error("Failed to get current snapshot: %s", e)
+            return "Unknown"
