@@ -12,6 +12,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
 from .powersoft_api import PowersoftAPI
 
+OPTIONS = {
+    "volume_channel": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    "mute_channel": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+}
+
+async def async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Called when options are updated."""
+    await hass.data[DOMAIN][entry.entry_id].async_request_refresh()
+
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.MEDIA_PLAYER, Platform.SENSOR, Platform.SWITCH, Platform.NUMBER]
@@ -49,7 +58,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
     }
 
+    # En async_setup_entry:
+    api = PowersoftAPI(host, port, username, password)
+    async with api:  # Prueba conexión
+        await api.get_status()  # Quick check
+    coordinator = DataUpdateCoordinator(...)  # Tu coordinator existente
+    coordinator.data = {"api": api}  # O usa dependency injection
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    
+    entry.async_on_unload(entry.add_update_listener(async_options_updated))
 
     return True
 
