@@ -27,28 +27,6 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect."""
-    api = PowersoftAPI(
-        data[CONF_HOST],
-        data.get(CONF_PORT, DEFAULT_PORT),
-        data.get(CONF_USERNAME),
-        data.get(CONF_PASSWORD),
-    )
-
-    try:
-        status = await api.get_status()
-        system_info = status.get("system", {})
-        
-        return {
-            "title": f"Powersoft {system_info.get('model', 'Amplifier')}",
-            "model": system_info.get("model", "Unknown"),
-            "serial": system_info.get("serial", "Unknown"),
-        }
-    finally:
-        await api.close()
-
-
 class PowersoftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Powersoft."""
 
@@ -62,18 +40,17 @@ class PowersoftConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             try:
-                info = await validate_input(self.hass, user_input)
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "cannot_connect"
-            else:
-                await self.async_set_unique_id(info["serial"])
+                # Simple validation - just check host is provided
+                await self.async_set_unique_id(user_input[CONF_HOST])
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
-                    title=info["title"],
+                    title=f"Powersoft {user_input[CONF_HOST]}",
                     data=user_input,
                 )
+            except Exception:
+                _LOGGER.exception("Unexpected exception")
+                errors["base"] = "cannot_connect"
 
         return self.async_show_form(
             step_id="user",

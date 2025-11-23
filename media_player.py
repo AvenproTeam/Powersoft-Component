@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, ATTR_CHANNEL
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ async def async_setup_entry(
 
     entities = []
     
-    # Get channels from coordinator data
     channels = coordinator.data.get("channels", {})
     if isinstance(channels, dict):
         channel_list = channels.get("channels", [])
@@ -63,18 +62,6 @@ class PowersoftChannel(CoordinatorEntity, MediaPlayerEntity):
         self._attr_name = f"Channel {channel}"
 
     @property
-    def device_info(self):
-        """Return device information."""
-        system_info = self.coordinator.data.get("system", {})
-        return {
-            "identifiers": {(DOMAIN, self.coordinator.config_entry.entry_id)},
-            "name": f"Powersoft {system_info.get('model', 'Amplifier')}",
-            "manufacturer": "Powersoft",
-            "model": system_info.get("model", "Unknown"),
-            "sw_version": system_info.get("firmware", "Unknown"),
-        }
-
-    @property
     def state(self) -> MediaPlayerState:
         """Return the state of the channel."""
         channel_data = self._get_channel_data()
@@ -84,16 +71,7 @@ class PowersoftChannel(CoordinatorEntity, MediaPlayerEntity):
         if channel_data.get("mute", False):
             return MediaPlayerState.OFF
         
-        if channel_data.get("signal_present", False):
-            return MediaPlayerState.PLAYING
-        
         return MediaPlayerState.ON
-
-    @property
-    def is_volume_muted(self) -> bool:
-        """Return boolean if volume is currently muted."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("mute", False) if channel_data else False
 
     @property
     def volume_level(self) -> float | None:
@@ -102,29 +80,8 @@ class PowersoftChannel(CoordinatorEntity, MediaPlayerEntity):
         if not channel_data:
             return None
         
-        # Convert dB to 0-1 range (assuming -80dB to 0dB range)
         gain_db = channel_data.get("gain", -80)
         return max(0.0, min(1.0, (gain_db + 80) / 80))
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return entity specific state attributes."""
-        channel_data = self._get_channel_data()
-        if not channel_data:
-            return {}
-
-        return {
-            ATTR_CHANNEL: self._channel,
-            "gain_db": channel_data.get("gain", 0),
-            "polarity": channel_data.get("polarity", "normal"),
-            "delay_ms": channel_data.get("delay", 0),
-            "temperature": channel_data.get("temperature"),
-            "impedance": channel_data.get("impedance"),
-            "voltage": channel_data.get("voltage"),
-            "current": channel_data.get("current"),
-            "clip": channel_data.get("clip", False),
-            "signal_present": channel_data.get("signal_present", False),
-        }
 
     def _get_channel_data(self) -> dict | None:
         """Get data for this channel."""
@@ -138,7 +95,6 @@ class PowersoftChannel(CoordinatorEntity, MediaPlayerEntity):
 
     async def async_set_volume_level(self, volume: float) -> None:
         """Set volume level, range 0..1."""
-        # Convert 0-1 range to dB (-80dB to 0dB)
         gain_db = (volume * 80) - 80
         await self._api.set_gain(self._channel, gain_db)
         await self.coordinator.async_request_refresh()
@@ -146,14 +102,4 @@ class PowersoftChannel(CoordinatorEntity, MediaPlayerEntity):
     async def async_mute_volume(self, mute: bool) -> None:
         """Mute the volume."""
         await self._api.set_mute(self._channel, mute)
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_on(self) -> None:
-        """Turn on the channel (unmute)."""
-        await self._api.set_mute(self._channel, False)
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_off(self) -> None:
-        """Turn off the channel (mute)."""
-        await self._api.set_mute(self._channel, True)
         await self.coordinator.async_request_refresh()

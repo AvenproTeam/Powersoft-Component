@@ -1,19 +1,12 @@
-"""
-Powersoft Amplifier Integration for Home Assistant.
-
-This integration provides control and monitoring of Powersoft amplifiers
-through their HTTP and UDP APIs.
-"""
+"""Powersoft Amplifier Integration for Home Assistant."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
@@ -21,12 +14,7 @@ from .powersoft_api import PowersoftAPI
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[Platform] = [
-    Platform.MEDIA_PLAYER,
-    Platform.SENSOR,
-    Platform.SWITCH,
-    Platform.NUMBER,
-]
+PLATFORMS = [Platform.MEDIA_PLAYER, Platform.SENSOR, Platform.SWITCH, Platform.NUMBER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
