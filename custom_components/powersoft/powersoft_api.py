@@ -85,69 +85,8 @@ class PowersoftAPI:
             _LOGGER.error("Unexpected error in /am request: %s", err)
             raise
 
-    async def _read_value(self, param_id: str) -> Any:
-        """Read a single value from the amplifier."""
-        values = [{"id": param_id, "single": True}]
-        result = await self._am_request("READ", values)
-        
-        try:
-            value_data = result["payload"]["action"]["values"][0]["data"]
-            
-            # Extract value based on type
-            if "boolValue" in value_data:
-                return value_data["boolValue"]
-            elif "floatValue" in value_data:
-                return value_data["floatValue"]
-            elif "intValue" in value_data:
-                return value_data["intValue"]
-            elif "stringValue" in value_data:
-                return value_data["stringValue"]
-            
-            return None
-        except (KeyError, IndexError) as e:
-            _LOGGER.error("Failed to parse read response: %s", e)
-            return None
-
-    async def _write_value(self, param_id: str, value: Any, value_type: str) -> bool:
-        """Write a single value to the amplifier.
-        
-        Args:
-            param_id: Parameter ID path
-            value: Value to write
-            value_type: "BOOL", "FLOAT", "INT", or "STRING"
-        """
-        # Map value_type to the correct key
-        value_key_map = {
-            "BOOL": "boolValue",
-            "FLOAT": "floatValue",
-            "INT": "intValue",
-            "STRING": "stringValue"
-        }
-        
-        value_key = value_key_map.get(value_type)
-        if not value_key:
-            _LOGGER.error("Invalid value type: %s", value_type)
-            return False
-
-        values = [{
-            "id": param_id,
-            "data": {
-                "type": value_type,
-                value_key: value
-            }
-        }]
-        
-        try:
-            result = await self._am_request("WRITE", values)
-            # Check if result is 10 (success)
-            result_code = result["payload"]["action"]["values"][0].get("result")
-            return result_code == 10
-        except Exception as e:
-            _LOGGER.error("Failed to write value: %s", e)
-            return False
-
     async def get_status(self) -> dict[str, Any]:
-        """Get amplifier status."""
+        """Get amplifier status by reading all channels at once."""
         status_data = {
             "system": {
                 "model": "Quattrocanali 8804 DSP",
@@ -162,23 +101,46 @@ class PowersoftAPI:
         }
 
         try:
-            # Read current snapshot
-            try:
-                current_snapshot = await self._read_value(
-                    "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
-                )
-                status_data["system"]["current_snapshot"] = current_snapshot
-            except Exception as e:
-                _LOGGER.debug("Could not read current snapshot: %s", e)
-
-            # Quattrocanali 8804 has 4 output channels (Channel-0 to Channel-3)
+            # Build a list of all parameters to read in one request
+            read_values = []
+            
+            # Read all 4 channels' parameters at once
             for ch in range(4):
+                read_values.extend([
+                    {
+                        "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Mute/Value",
+                        "single": True
+                    },
+                    {
+                        "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Gain/Value",
+                        "single": True
+                    }
+                ])
+            
+            # Also read current snapshot
+            read_values.append({
+                "id": "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current",
+                "single": True
+            })
+
+            # Make single bulk request
+            result = await self._am_request("READ", read_values)
+            
+            # Parse the response
+            response_values = result.get("payload", {}).get("action", {}).get("values", [])
+            
+            # Map responses back to channels
+            # Response order matches request order: Ch0 Mute, Ch0 Gain, Ch1 Mute, Ch1 Gain, etc.
+            for ch in range(4):
+                mute_idx = ch * 2
+                gain_idx = ch * 2 + 1
+                
                 channel_data = {
                     "number": ch + 1,  # Display as 1-4
-                    "gain": None,
+                    "gain": -80.0,  # Default
                     "mute": False,
                     "polarity": "normal",
-                    "delay": None,
+                    "delay": 0.0,
                     "voltage": None,
                     "current": None,
                     "power": None,
@@ -187,53 +149,49 @@ class PowersoftAPI:
                     "clip": False
                 }
                 
-                try:
-                    # Read mute status
-                    mute = await self._read_value(
-                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Mute/Value"
-                    )
-                    if mute is not None:
-                        channel_data["mute"] = mute
-                except Exception as e:
-                    _LOGGER.debug("Could not read mute for channel %d: %s", ch, e)
-
-                try:
-                    # Read gain (output level)
-                    gain = await self._read_value(
-                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Gain/Value"
-                    )
-                    if gain is not None:
-                        # Convert to dB if needed (assuming 0-1 range = -80 to 0 dB)
-                        channel_data["gain"] = (gain * 80) - 80 if gain <= 1 else gain
-                except Exception as e:
-                    _LOGGER.debug("Could not read gain for channel %d: %s", ch, e)
-
-                try:
-                    # Read polarity
-                    polarity = await self._read_value(
-                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Polarity/Value"
-                    )
-                    if polarity is not None:
-                        channel_data["polarity"] = "inverted" if polarity else "normal"
-                except Exception as e:
-                    _LOGGER.debug("Could not read polarity for channel %d: %s", ch, e)
-
-                try:
-                    # Read delay
-                    delay = await self._read_value(
-                        f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Delay/Value"
-                    )
-                    if delay is not None:
-                        channel_data["delay"] = delay
-                except Exception as e:
-                    _LOGGER.debug("Could not read delay for channel %d: %s", ch, e)
-
+                # Extract mute
+                if mute_idx < len(response_values):
+                    mute_data = response_values[mute_idx].get("data", {})
+                    if "boolValue" in mute_data:
+                        channel_data["mute"] = mute_data["boolValue"]
+                
+                # Extract gain
+                if gain_idx < len(response_values):
+                    gain_data = response_values[gain_idx].get("data", {})
+                    if "floatValue" in gain_data:
+                        # Convert 0-1 range to dB (-80 to 0)
+                        gain_value = gain_data["floatValue"]
+                        channel_data["gain"] = (gain_value * 80) - 80
+                
                 status_data["channels"]["channels"].append(channel_data)
+            
+            # Extract snapshot (last value)
+            if len(response_values) > 8:
+                snapshot_data = response_values[-1].get("data", {})
+                if "stringValue" in snapshot_data:
+                    status_data["system"]["current_snapshot"] = snapshot_data["stringValue"]
+
+            _LOGGER.info("Successfully retrieved status for %d channels", len(status_data["channels"]["channels"]))
 
         except Exception as err:
-            _LOGGER.error("Failed to get complete status: %s", err)
+            _LOGGER.error("Failed to get status: %s", err, exc_info=True)
+            # Return default data with 4 channels even on error
+            for ch in range(1, 5):
+                if len(status_data["channels"]["channels"]) < 4:
+                    status_data["channels"]["channels"].append({
+                        "number": ch,
+                        "gain": -80.0,
+                        "mute": False,
+                        "polarity": "normal",
+                        "delay": 0.0,
+                        "voltage": None,
+                        "current": None,
+                        "power": None,
+                        "impedance": None,
+                        "signal_present": False,
+                        "clip": False
+                    })
 
-        _LOGGER.info("Status data retrieved: %d channels", len(status_data["channels"]["channels"]))
         return status_data
 
     async def set_mute(self, channel: int, mute: bool) -> bool:
@@ -243,13 +201,32 @@ class PowersoftAPI:
             channel: Channel number (1-4)
             mute: True to mute, False to unmute
         """
-        ch_index = channel - 1  # Convert to 0-based index
-        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Mute/Value"
-        
-        success = await self._write_value(param_id, mute, "BOOL")
-        if success:
-            _LOGGER.info("Set channel %d mute to %s", channel, mute)
-        return success
+        try:
+            ch_index = channel - 1  # Convert to 0-based index
+            
+            values = [{
+                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Mute/Value",
+                "data": {
+                    "type": "BOOL",
+                    "boolValue": mute
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            
+            # Check if result is 10 (success)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Set channel %d mute to %s", channel, mute)
+            else:
+                _LOGGER.warning("Mute command returned code %s for channel %d", result_code, channel)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to set mute on channel %d: %s", channel, e, exc_info=True)
+            return False
 
     async def set_gain(self, channel: int, gain: float) -> bool:
         """Set gain (in dB) for a channel.
@@ -258,18 +235,35 @@ class PowersoftAPI:
             channel: Channel number (1-4)
             gain: Gain in dB (typically -80 to 0)
         """
-        ch_index = channel - 1
-        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Gain/Value"
-        
-        # Convert dB to 0-1 range if the API expects that
-        # Assuming -80dB = 0.0, 0dB = 1.0
-        normalized_gain = (gain + 80) / 80
-        normalized_gain = max(0.0, min(1.0, normalized_gain))
-        
-        success = await self._write_value(param_id, normalized_gain, "FLOAT")
-        if success:
-            _LOGGER.info("Set channel %d gain to %.1f dB", channel, gain)
-        return success
+        try:
+            ch_index = channel - 1
+            
+            # Convert dB to 0-1 range
+            # -80dB = 0.0, 0dB = 1.0
+            normalized_gain = (gain + 80) / 80
+            normalized_gain = max(0.0, min(1.0, normalized_gain))
+            
+            values = [{
+                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Gain/Value",
+                "data": {
+                    "type": "FLOAT",
+                    "floatValue": normalized_gain
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Set channel %d gain to %.1f dB (%.3f normalized)", channel, gain, normalized_gain)
+            else:
+                _LOGGER.warning("Gain command returned code %s for channel %d", result_code, channel)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to set gain on channel %d: %s", channel, e, exc_info=True)
+            return False
 
     async def set_polarity(self, channel: int, inverted: bool) -> bool:
         """Set polarity for a channel.
@@ -278,13 +272,28 @@ class PowersoftAPI:
             channel: Channel number (1-4)
             inverted: True to invert polarity, False for normal
         """
-        ch_index = channel - 1
-        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Polarity/Value"
-        
-        success = await self._write_value(param_id, inverted, "BOOL")
-        if success:
-            _LOGGER.info("Set channel %d polarity inverted: %s", channel, inverted)
-        return success
+        try:
+            ch_index = channel - 1
+            
+            values = [{
+                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Polarity/Value",
+                "data": {
+                    "type": "BOOL",
+                    "boolValue": inverted
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Set channel %d polarity inverted: %s", channel, inverted)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to set polarity on channel %d: %s", channel, e, exc_info=True)
+            return False
 
     async def set_delay(self, channel: int, delay_ms: float) -> bool:
         """Set delay (in milliseconds) for a channel.
@@ -293,13 +302,28 @@ class PowersoftAPI:
             channel: Channel number (1-4)
             delay_ms: Delay in milliseconds
         """
-        ch_index = channel - 1
-        param_id = f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Delay/Value"
-        
-        success = await self._write_value(param_id, delay_ms, "FLOAT")
-        if success:
-            _LOGGER.info("Set channel %d delay to %.1f ms", channel, delay_ms)
-        return success
+        try:
+            ch_index = channel - 1
+            
+            values = [{
+                "id": f"/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch_index}/Delay/Value",
+                "data": {
+                    "type": "FLOAT",
+                    "floatValue": delay_ms
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Set channel %d delay to %.1f ms", channel, delay_ms)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to set delay on channel %d: %s", channel, e, exc_info=True)
+            return False
 
     async def set_matrix_gain(self, input_ch: int, output_ch: int, gain: float) -> bool:
         """Set input matrix gain.
@@ -309,14 +333,29 @@ class PowersoftAPI:
             output_ch: Output channel (1-4)
             gain: Gain value (typically 0-1, where 1 = 0dB)
         """
-        in_index = input_ch - 1
-        out_index = output_ch - 1
-        param_id = f"/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_index}/Gain-{out_index}/Value"
-        
-        success = await self._write_value(param_id, gain, "FLOAT")
-        if success:
-            _LOGGER.info("Set matrix gain Input %d -> Output %d to %.2f", input_ch, output_ch, gain)
-        return success
+        try:
+            in_index = input_ch - 1
+            out_index = output_ch - 1
+            
+            values = [{
+                "id": f"/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_index}/Gain-{out_index}/Value",
+                "data": {
+                    "type": "FLOAT",
+                    "floatValue": gain
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Set matrix gain Input %d -> Output %d to %.2f", input_ch, output_ch, gain)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to set matrix gain: %s", e, exc_info=True)
+            return False
 
     async def load_snapshot(self, snapshot_id: int) -> bool:
         """Load a snapshot/preset.
@@ -324,20 +363,42 @@ class PowersoftAPI:
         Args:
             snapshot_id: Snapshot slot ID to load
         """
-        param_id = "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value"
-        
-        success = await self._write_value(param_id, snapshot_id, "INT")
-        if success:
-            _LOGGER.info("Loaded snapshot %d", snapshot_id)
-        return success
+        try:
+            values = [{
+                "id": "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value",
+                "data": {
+                    "type": "INT",
+                    "intValue": snapshot_id
+                }
+            }]
+            
+            result = await self._am_request("WRITE", values)
+            result_code = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("result")
+            success = result_code == 10
+            
+            if success:
+                _LOGGER.info("Loaded snapshot %d", snapshot_id)
+            
+            return success
+        except Exception as e:
+            _LOGGER.error("Failed to load snapshot: %s", e, exc_info=True)
+            return False
 
     async def get_current_snapshot(self) -> str:
         """Get currently loaded snapshot ID."""
         try:
-            snapshot_id = await self._read_value(
-                "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
-            )
-            return snapshot_id if snapshot_id else "Unknown"
+            values = [{
+                "id": "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current",
+                "single": True
+            }]
+            
+            result = await self._am_request("READ", values)
+            snapshot_data = result.get("payload", {}).get("action", {}).get("values", [{}])[0].get("data", {})
+            
+            if "stringValue" in snapshot_data:
+                return snapshot_data["stringValue"]
+            
+            return "Unknown"
         except Exception as e:
-            _LOGGER.error("Failed to get current snapshot: %s", e)
+            _LOGGER.error("Failed to get current snapshot: %s", e, exc_info=True)
             return "Unknown"
