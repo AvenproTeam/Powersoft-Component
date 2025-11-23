@@ -1,0 +1,8 @@
+{
+  "name": "Powersoft Amplifiers",
+  "country": ["ES"],
+  "domains": ["media_player", "sensor", "switch", "number"],
+  "iot_class": "Local Polling",
+  "render_readme": true,
+  "homeassistant": "2024.1.0"
+}

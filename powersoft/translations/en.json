@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure Powersoft Amplifier",
+        "description": "Enter the connection details for your Powersoft amplifier",
+        "data": {
+          "host": "Host (IP Address)",
+          "port": "Port",
+          "username": "Username (optional)",
+          "password": "Password (optional)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the amplifier. Please check the IP address and port."
+    },
+    "abort": {
+      "already_configured": "This amplifier is already configured"
+    }
+  }
+}

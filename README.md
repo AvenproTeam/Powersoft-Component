@@ -1,6 +1,9 @@
-# Powersoft Amplifier Integration for Home Assistant
+# Powersoft Amplifiers Integration for Home Assistant
 
-Esta integración personalizada permite monitorizar y controlar amplificadores Powersoft a través de su API HTTP y protocolo UDP.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
+[![GitHub release](https://img.shields.io/github/release/AvenproTeam/Powersoft-Component.svg)](https://github.com/AvenproTeam/Powersoft-Component/releases)
+
+Integración personalizada para Home Assistant que permite monitorizar y controlar amplificadores Powersoft a través de su API HTTP.
 
 ## Características
 
@@ -20,7 +23,7 @@ Esta integración personalizada permite monitorizar y controlar amplificadores P
 
 ## Modelos compatibles
 
-Esta integración ha sido probada con los siguientes modelos de Powersoft:
+Esta integración ha sido diseñada para trabajar con:
 
 - Serie Ottocanali (DSP+D)
 - Serie X (X4, X8)
@@ -35,17 +38,20 @@ Esta integración ha sido probada con los siguientes modelos de Powersoft:
 
 ### HACS (Recomendado)
 
-1. Abre HACS en tu Home Assistant
-2. Ve a "Integraciones"
-3. Haz clic en el menú de tres puntos (arriba a la derecha)
+1. Asegúrate de tener [HACS](https://hacs.xyz/) instalado
+2. En HACS, ve a "Integraciones"
+3. Haz clic en el menú de tres puntos (esquina superior derecha)
 4. Selecciona "Repositorios personalizados"
-5. Añade la URL de este repositorio
-6. Busca "Powersoft" e instala
+5. Añade esta URL: `https://github.com/AvenproTeam/Powersoft-Component`
+6. Selecciona la categoría "Integration"
+7. Busca "Powersoft" en HACS e instala
+8. Reinicia Home Assistant
 
 ### Manual
 
-1. Copia la carpeta `custom_components/powersoft` en tu directorio `config/custom_components/`
-2. Reinicia Home Assistant
+1. Descarga la carpeta `custom_components/powersoft` de este repositorio
+2. Copia la carpeta en tu directorio `config/custom_components/`
+3. Reinicia Home Assistant
 
 ## Configuración
 
@@ -55,194 +61,83 @@ Esta integración ha sido probada con los siguientes modelos de Powersoft:
 4. Introduce los datos de conexión:
    - **Host**: Dirección IP del amplificador
    - **Puerto**: Puerto HTTP (por defecto 80)
-   - **Usuario** (opcional): Si el amplificador tiene autenticación habilitada
-   - **Contraseña** (opcional): Si el amplificador tiene autenticación habilitada
+   - **Usuario** (opcional): Si el amplificador tiene autenticación
+   - **Contraseña** (opcional): Si el amplificador tiene autenticación
 
 ## Entidades creadas
 
-Para cada amplificador Powersoft configurado, la integración creará:
-
 ### Media Player (por canal)
-- Control de volumen (ganancia)
+- Control de volumen (ganancia en dB)
 - Mute/Unmute
 - Estado de reproducción
-- Atributos adicionales:
-  - Ganancia en dB
-  - Polaridad
-  - Delay
-  - Temperatura
-  - Impedancia
-  - Voltaje, corriente
-  - Estado de clipping
-  - Presencia de señal
 
 ### Sensores
-- **Temperatura del amplificador** (°C)
-- Por canal:
-  - **Voltaje** (V)
-  - **Corriente** (A)
-  - **Potencia** (W)
-  - **Impedancia** (Ω)
+- Temperatura del amplificador (°C)
+- Voltaje por canal (V)
+- Corriente por canal (A)
+- Potencia por canal (W)
+- Impedancia por canal (Ω)
 
 ### Switches
-- **Power**: Encendido/Standby del amplificador
-- **Polaridad invertida** (por canal): Inversión de fase
+- Power: Encendido/Standby del amplificador
+- Polaridad invertida por canal
 
 ### Controles numéricos
-- **Ganancia** (por canal): -80 a 0 dB
-- **Delay** (por canal): 0 a 500 ms
+- Ganancia por canal: -80 a 0 dB
+- Delay por canal: 0 a 500 ms
 
-## Servicios
+## Uso
 
-### `powersoft.set_gain`
-Ajusta la ganancia de un canal específico.
+### Control básico
 
 ```yaml
-service: powersoft.set_gain
-data:
+# Ajustar volumen del canal 1 al 50%
+service: media_player.volume_set
+target:
   entity_id: media_player.powersoft_channel_1
-  channel: 1
-  gain: -10.0
-```
-
-### `powersoft.set_mute`
-Silencia o activa un canal.
-
-```yaml
-service: powersoft.set_mute
 data:
-  entity_id: media_player.powersoft_channel_1
-  channel: 1
-  mute: true
-```
+  volume_level: 0.5
 
-### `powersoft.set_polarity`
-Invierte la polaridad de un canal.
-
-```yaml
-service: powersoft.set_polarity
+# Silenciar canal 2
+service: media_player.volume_mute
+target:
+  entity_id: media_player.powersoft_channel_2
 data:
-  entity_id: media_player.powersoft_channel_1
-  channel: 1
-  inverted: true
+  is_volume_muted: true
 ```
-
-### `powersoft.set_delay`
-Ajusta el delay de un canal.
-
-```yaml
-service: powersoft.set_delay
-data:
-  entity_id: media_player.powersoft_channel_1
-  channel: 1
-  delay: 25.5
-```
-
-### `powersoft.load_snapshot`
-Carga un snapshot/preset guardado.
-
-```yaml
-service: powersoft.load_snapshot
-data:
-  entity_id: media_player.powersoft_channel_1
-  snapshot: 1
-```
-
-## Ejemplos de automatización
-
-### Apagar el amplificador automáticamente
-```yaml
-automation:
-  - alias: "Apagar amplificador por la noche"
-    trigger:
-      - platform: time
-        at: "23:00:00"
-    action:
-      - service: switch.turn_off
-        target:
-          entity_id: switch.powersoft_power
-```
-
-### Alerta de temperatura alta
-```yaml
-automation:
-  - alias: "Alerta temperatura amplificador"
-    trigger:
-      - platform: numeric_state
-        entity_id: sensor.powersoft_temperature
-        above: 70
-    action:
-      - service: notify.mobile_app
-        data:
-          message: "¡Temperatura del amplificador alta: {{ states('sensor.powersoft_temperature') }}°C!"
-```
-
-### Control de volumen por hora del día
-```yaml
-automation:
-  - alias: "Volumen automático mañana"
-    trigger:
-      - platform: time
-        at: "08:00:00"
-    action:
-      - service: powersoft.set_gain
-        data:
-          entity_id: media_player.powersoft_channel_1
-          channel: 1
-          gain: -20.0
-```
-
-## API HTTP del amplificador
-
-La integración utiliza principalmente el protocolo HTTP para comunicarse con el amplificador. Los endpoints típicos incluyen:
-
-- `/api/system` - Información del sistema
-- `/api/channels` - Estado de los canales
-- `/api/channels/{n}/mute` - Control de mute
-- `/api/channels/{n}/gain` - Control de ganancia
-- `/api/channels/{n}/polarity` - Control de polaridad
-- `/api/channels/{n}/delay` - Control de delay
-- `/api/power` - Control de encendido
-- `/api/snapshots` - Gestión de snapshots
-
-## Protocolo UDP
-
-La integración también soporta el protocolo UDP (puerto 8002) para comandos avanzados que no están disponibles en la API HTTP.
 
 ## Troubleshooting
 
 ### El amplificador no se detecta
 - Verifica que el amplificador esté en la misma red
 - Comprueba que el puerto 80 (HTTP) esté accesible
-- Verifica que la API HTTP esté habilitada en el amplificador (en algunos modelos se debe habilitar desde ArmoníaPlus)
+- Verifica que la API HTTP esté habilitada (puede requerirse desde ArmoníaPlus)
 
-### Los valores no se actualizan
-- Comprueba los logs de Home Assistant para errores
-- Verifica que el amplificador responde correctamente navegando a `http://IP_DEL_AMPLIFICADOR` en tu navegador
-- Algunos modelos requieren autenticación - asegúrate de configurar usuario y contraseña
-
-### Comandos no funcionan
-- Verifica que tu usuario tenga permisos de control en el amplificador
+### Los comandos no funcionan
+- Verifica que tu usuario tenga permisos de control
 - Algunos amplificadores tienen un modo "Control Lock" que debe estar desactivado
-- Comprueba que ArmoníaPlus no esté conectado simultáneamente (puede causar conflictos)
+- Comprueba que ArmoníaPlus no esté conectado simultáneamente
+
+### Necesitas adaptar la API
+Este componente usa endpoints genéricos. Si tu modelo de amplificador usa diferentes rutas API, edita el archivo `powersoft_api.py` con los endpoints correctos para tu hardware.
 
 ## Contribuciones
 
-Las contribuciones son bienvenidas. Por favor, abre un issue o pull request en GitHub.
+Las contribuciones son bienvenidas. Por favor:
+1. Haz fork del repositorio
+2. Crea una rama para tu feature
+3. Envía un Pull Request
 
 ## Licencia
 
 MIT License
 
-## Créditos
-
-Desarrollado para la comunidad de Home Assistant.
-Basado en la documentación oficial de la API de Powersoft.
-
 ## Soporte
 
-Si encuentras algún problema o tienes sugerencias, por favor abre un issue en GitHub.
+Si encuentras algún problema o tienes sugerencias:
+- Abre un [Issue](https://github.com/AvenproTeam/Powersoft-Component/issues)
+- Únete a las discusiones
 
 ---
 
-**Nota importante:** Esta integración no está afiliada ni respaldada oficialmente por Powersoft. Úsala bajo tu propia responsabilidad.
+**Nota:** Esta integración no está afiliada ni respaldada oficialmente por Powersoft. Úsala bajo tu propia responsabilidad.
