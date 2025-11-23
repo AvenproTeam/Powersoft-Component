@@ -1,0 +1,143 @@
+set_gain:
+  name: Set Gain
+  description: Set the gain level for a specific channel
+  fields:
+    entity_id:
+      name: Entity
+      description: The media player entity to control
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          integration: powersoft
+    channel:
+      name: Channel
+      description: Channel number
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 16
+          mode: box
+    gain:
+      name: Gain
+      description: Gain level in dB
+      required: true
+      selector:
+        number:
+          min: -80
+          max: 0
+          step: 0.5
+          unit_of_measurement: "dB"
+          mode: slider
+
+set_mute:
+  name: Set Mute
+  description: Mute or unmute a specific channel
+  fields:
+    entity_id:
+      name: Entity
+      description: The media player entity to control
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          integration: powersoft
+    channel:
+      name: Channel
+      description: Channel number
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 16
+          mode: box
+    mute:
+      name: Mute
+      description: Mute state
+      required: true
+      selector:
+        boolean:
+
+set_polarity:
+  name: Set Polarity
+  description: Set the polarity (phase) for a specific channel
+  fields:
+    entity_id:
+      name: Entity
+      description: The media player entity to control
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          integration: powersoft
+    channel:
+      name: Channel
+      description: Channel number
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 16
+          mode: box
+    inverted:
+      name: Inverted
+      description: Invert polarity
+      required: true
+      selector:
+        boolean:
+
+set_delay:
+  name: Set Delay
+  description: Set the delay for a specific channel
+  fields:
+    entity_id:
+      name: Entity
+      description: The media player entity to control
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          integration: powersoft
+    channel:
+      name: Channel
+      description: Channel number
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 16
+          mode: box
+    delay:
+      name: Delay
+      description: Delay in milliseconds
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 500
+          step: 0.1
+          unit_of_measurement: "ms"
+          mode: box
+
+load_snapshot:
+  name: Load Snapshot
+  description: Load a preset/snapshot from the amplifier
+  fields:
+    entity_id:
+      name: Entity
+      description: The media player entity to control
+      required: true
+      selector:
+        entity:
+          domain: media_player
+          integration: powersoft
+    snapshot:
+      name: Snapshot
+      description: Snapshot number to load
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
