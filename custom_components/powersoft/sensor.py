@@ -1,305 +1,198 @@
 """Sensor platform for Powersoft amplifiers."""
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
-from typing import Any
 
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    TEMP_CELSIUS,
-    SIGNAL_STRENGTH_DECIBELS,
-    POWER_WATT,
-    ELECTRICAL_VOLT_AMPERE,
-    ELECTRICAL_CURRENT_AMPERE,
-    ELECTRICAL_OHM,
+    UnitOfElectricCurrent,
+    UnitOfElectricPotential,
+    UnitOfTemperature,
+    UnitOfPower,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import ConfigType, DiscoveryInfoType
-from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(seconds=10)
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry,
+    config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Powersoft sensors from a config entry."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]
-
-    # Primera actualización para tener datos
-    await coordinator.async_config_entry_first_refresh()
+    """Set up Powersoft sensor entities."""
+    data = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = data["coordinator"]
 
     entities = []
+    
+    # Add system temperature sensor
+    entities.append(PowersoftTemperatureSensor(coordinator, config_entry.entry_id))
+    
+    # Add channel-specific sensors
+    channels = coordinator.data.get("channels", {})
+    if isinstance(channels, dict):
+        channel_list = channels.get("channels", [])
+        for channel in channel_list:
+            channel_num = channel.get("number")
+            if channel_num is not None:
+                entities.extend([
+                    PowersoftChannelVoltageSensor(coordinator, channel_num, config_entry.entry_id),
+                    PowersoftChannelCurrentSensor(coordinator, channel_num, config_entry.entry_id),
+                    PowersoftChannelPowerSensor(coordinator, channel_num, config_entry.entry_id),
+                    PowersoftChannelImpedanceSensor(coordinator, channel_num, config_entry.entry_id),
+                ])
 
-    # Sensor principal del equipo
-    entities.append(PowersoftDeviceSensor(coordinator))
-
-    # Sensores del sistema
-    entities.append(PowersoftTemperatureSensor(coordinator))
-    entities.append(PowersoftSnapshotSensor(coordinator))
-
-    # Sensores por canal (creados dinámicamente)
-    if coordinator.data and "channels" in coordinator.data:
-        for channel in coordinator.data["channels"]:
-            ch_num = channel["number"]
-            entities.extend(
-                [
-                    PowersoftGainSensor(coordinator, ch_num),
-                    PowersoftMuteSensor(coordinator, ch_num),
-                    PowersoftPolaritySensor(coordinator, ch_num),
-                    PowersoftDelaySensor(coordinator, ch_num),
-                    PowersoftVoltageSensor(coordinator, ch_num),
-                    PowersoftCurrentSensor(coordinator, ch_num),
-                    PowersoftPowerSensor(coordinator, ch_num),
-                    PowersoftImpedanceSensor(coordinator, ch_num),
-                    PowersoftClipSensor(coordinator, ch_num),
-                    PowersoftSignalSensor(coordinator, ch_num),
-                ]
-            )
-
-    async_add_entities(entities, True)
+    _LOGGER.info("Adding %d sensor entities", len(entities))
+    async_add_entities(entities)
 
 
-class PowersoftCoordinatorEntity(CoordinatorEntity):
-    """Base class for all Powersoft entities."""
+class PowersoftSensorBase(CoordinatorEntity, SensorEntity):
+    """Base class for Powersoft sensors."""
 
-    def __init__(self, coordinator: DataUpdateCoordinator, name_suffix: str = ""):
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, entry_id: str) -> None:
+        """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_device_info = coordinator.device_info
-        self._attr_name = f"Powersoft {coordinator.data['system']['model']} {name_suffix}".strip()
-        self._attr_unique_id = f"{coordinator.serial}_{name_suffix.replace(' ', '_').lower()}"
-
-
-# ==================== SENSORES DEL SISTEMA ====================
-
-class PowersoftDeviceSensor(PowersoftCoordinatorEntity, SensorEntity):
-    """Sensor que muestra modelo + serial del amplificador."""
-
-    _attr_icon = "mdi:amplifier"
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_options = []  # No es enum, pero lo usamos como descripción
-
-    def __init__(self, coordinator):
-        super().__init__(coordinator, "")
-        self._attr_native_value = f"{coordinator.data['system']['model']} ({coordinator.serial})"
+        self._entry_id = entry_id
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
+    def device_info(self):
+        """Return device information."""
+        system_info = self.coordinator.data.get("system", {})
         return {
-            "firmware": self.coordinator.data["system"]["firmware"],
-            "snapshot": self.coordinator.data["system"]["current_snapshot"],
+            "identifiers": {(DOMAIN, self._entry_id)},
+            "name": f"Powersoft {system_info.get('model', 'Amplifier')}",
+            "manufacturer": "Powersoft",
+            "model": system_info.get("model", "Quattrocanali 8804 DSP"),
+            "sw_version": system_info.get("firmware", "Unknown"),
         }
 
 
-class PowersoftTemperatureSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_name_suffix = "Temperature"
+class PowersoftTemperatureSensor(PowersoftSensorBase):
+    """Temperature sensor for the amplifier."""
+
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = TEMP_CELSIUS
-    _attr_icon = "mdi:thermometer"
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_name = "Temperature"
+
+    def __init__(self, coordinator, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry_id)
+        self._attr_unique_id = f"{entry_id}_temperature"
 
     @property
-    def native_value(self):
-        return self.coordinator.data["system"]["temperature"]
+    def native_value(self) -> float | None:
+        """Return the temperature value."""
+        system_info = self.coordinator.data.get("system", {})
+        return system_info.get("temperature")
 
 
-class PowersoftSnapshotSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_name_suffix = "Current Snapshot"
-    _attr_icon = "mdi:bookmark-music"
+class PowersoftChannelSensorBase(PowersoftSensorBase):
+    """Base class for channel-specific sensors."""
 
-    @property
-    def native_value(self):
-        return self.coordinator.data["system"]["current_snapshot"]
+    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entry_id)
+        self._channel = channel
 
-
-# ==================== SENSORES POR CANAL ====================
-
-class PowersoftGainSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS
-    _attr_icon = "mdi:volume-high"
-
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Gain")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return round(ch["gain"], 1) if ch else None
-
-    @property
-    def icon(self):
-        return "mdi:volume-minus" if self.native_value <= -60 else "mdi:volume-high"
+    def _get_channel_data(self) -> dict | None:
+        """Get data for this channel."""
+        channels = self.coordinator.data.get("channels", {})
+        if isinstance(channels, dict):
+            channel_list = channels.get("channels", [])
+            for channel in channel_list:
+                if channel.get("number") == self._channel:
+                    return channel
+        return None
 
 
-class PowersoftMuteSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_device_class = SensorDeviceClass.SOUND
-    _attr_icon = "mdi:volume-off"
+class PowersoftChannelVoltageSensor(PowersoftChannelSensorBase):
+    """Voltage sensor for a channel."""
 
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Mute")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return "Muted" if ch and ch["mute"] else "Unmuted"
-
-    @property
-    def icon(self):
-        return "mdi:volume-off" if self.is_muted else "mdi:volume-high"
-
-    @property
-    def is_muted(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return ch["mute"] if ch else False
-
-
-class PowersoftPolaritySensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_icon = "mdi:swap-horizontal"
-
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Polarity")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return "Inverted" if ch and ch["polarity_inverted"] else "Normal"
-
-
-class PowersoftDelaySensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_icon = "mdi:clock-outline"
-    _attr_native_unit_of_measurement = "ms"
-    _attr_state_class = SensorStateClass.MEASUREMENT
-
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Delay")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return round(ch["delay_ms"], 1) if ch else 0.0
-
-
-class PowersoftVoltageSensor(PowersoftCoordinatorEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.VOLTAGE
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "V"
-    _attr_icon = "mdi:flash"
+    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
 
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Voltage")
-        self.channel = channel
+    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, channel, entry_id)
+        self._attr_unique_id = f"{entry_id}_ch{channel}_voltage"
+        self._attr_name = f"Channel {channel} Voltage"
 
     @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return ch["voltage"] if ch and ch["voltage"] not in (None, 0) else None
+    def native_value(self) -> float | None:
+        """Return the voltage value."""
+        channel_data = self._get_channel_data()
+        return channel_data.get("voltage") if channel_data else None
 
 
-class PowersoftCurrentSensor(PowersoftCoordinatorEntity, SensorEntity):
+class PowersoftChannelCurrentSensor(PowersoftChannelSensorBase):
+    """Current sensor for a channel."""
+
     _attr_device_class = SensorDeviceClass.CURRENT
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = ELECTRICAL_CURRENT_AMPERE
-    _attr_icon = "mdi:current-ac"
+    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
 
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Current")
-        self.channel = channel
+    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, channel, entry_id)
+        self._attr_unique_id = f"{entry_id}_ch{channel}_current"
+        self._attr_name = f"Channel {channel} Current"
 
     @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return round(ch["current"], 3) if ch and ch["current"] not in (None, 0) else None
+    def native_value(self) -> float | None:
+        """Return the current value."""
+        channel_data = self._get_channel_data()
+        return channel_data.get("current") if channel_data else None
 
 
-class PowersoftPowerSensor(PowersoftCoordinatorEntity, SensorEntity):
+class PowersoftChannelPowerSensor(PowersoftChannelSensorBase):
+    """Power sensor for a channel."""
+
     _attr_device_class = SensorDeviceClass.POWER
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = POWER_WATT
-    _attr_icon = "mdi:lightning-bolt"
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
 
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Power")
-        self.channel = channel
+    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, channel, entry_id)
+        self._attr_unique_id = f"{entry_id}_ch{channel}_power"
+        self._attr_name = f"Channel {channel} Power"
 
     @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return round(ch["power"], 1) if ch and ch["power"] not in (None, 0) else None
+    def native_value(self) -> float | None:
+        """Return the power value."""
+        channel_data = self._get_channel_data()
+        return channel_data.get("power") if channel_data else None
 
 
-class PowersoftImpedanceSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_device_class = SensorDeviceClass.IMPEDANCE
+class PowersoftChannelImpedanceSensor(PowersoftChannelSensorBase):
+    """Impedance sensor for a channel."""
+
     _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = ELECTRICAL_OHM
+    _attr_native_unit_of_measurement = "Ω"
     _attr_icon = "mdi:omega"
 
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Impedance")
-        self.channel = channel
+    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, channel, entry_id)
+        self._attr_unique_id = f"{entry_id}_ch{channel}_impedance"
+        self._attr_name = f"Channel {channel} Impedance"
 
     @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return round(ch["impedance"], 1) if ch and ch["impedance"] not in (None, 0) else None
-
-
-class PowersoftClipSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_icon = "mdi:alert-circle"
-
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Clip")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return "Clipping" if ch and ch["clip"] else "OK"
-
-    @property
-    def icon(self):
-        return "mdi:alert" if self.is_clipping else "mdi:check-circle"
-
-    @property
-    def is_clipping(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return ch["clip"] if ch else False
-
-
-class PowersoftSignalSensor(PowersoftCoordinatorEntity, SensorEntity):
-    _attr_icon = "mdi:waveform"
-
-    def __init__(self, coordinator, channel: int):
-        super().__init__(coordinator, f"Channel {channel} Signal")
-        self.channel = channel
-
-    @property
-    def native_value(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return "Present" if ch and ch["signal_present"] else "Absent"
-
-    @property
-    def icon(self):
-        return "mdi:waveform" if self.has_signal else "mdi:volume-mute"
-
-    @property
-    def has_signal(self):
-        ch = next((c for c in self.coordinator.data["channels"] if c["number"] == self.channel), None)
-        return ch["signal_present"] if ch else False
+    def native_value(self) -> float | None:
+        """Return the impedance value."""
+        channel_data = self._get_channel_data()
+        return channel_data.get("impedance") if channel_data else None
