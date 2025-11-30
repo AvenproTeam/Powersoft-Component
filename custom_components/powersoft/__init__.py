@@ -1,21 +1,25 @@
-"""Powersoft Amplifier integration."""
+"""Powersoft Amplifier Integration for Home Assistant."""
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
 
-import aiohttp
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_USERNAME
+from homeassistant.const import CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import PowersoftAPI
-from .const import DOMAIN
+from .const import DOMAIN, DEFAULT_SCAN_INTERVAL
+from .powersoft_api import PowersoftAPI
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["sensor", "media_player", "switch"]
+PLATFORMS: list[Platform] = [
+    Platform.MEDIA_PLAYER,
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.NUMBER,
+]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -27,49 +31,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     api = PowersoftAPI(host, port, username, password)
 
-    async def _update_data():
+    async def async_update_data():
+        """Fetch data from API."""
         try:
             return await api.get_status()
         except Exception as err:
-            raise UpdateFailed(f"Error communicating with Powersoft: {err}") from err
+            _LOGGER.error("Error communicating with API: %s", err)
+            raise UpdateFailed(f"Error communicating with API: {err}") from err
 
     coordinator = DataUpdateCoordinator(
         hass,
-        _LOGGER,  # ← Aquí está el logger que faltaba
-        name=f"Powersoft {host}",
-        update_method=_update_data,
-        update_interval=timedelta(seconds=10),
+        _LOGGER,
+        name=f"powersoft_{host}",
+        update_method=async_update_data,
+        update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
     )
 
-    # Primera actualización
+    # Fetch initial data
     await coordinator.async_config_entry_first_refresh()
 
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = coordinator
-    coordinator.api = api
-    coordinator.serial = coordinator.data["system"].get("serial", "unknown")
-    coordinator.device_info = {
-        "identifiers": {(DOMAIN, coordinator.serial)},
-        "name": f"Powersoft {coordinator.data['system']['model']}",
-        "manufacturer": "Powersoft",
-        "model": coordinator.data["system"]["model"],
-        "sw_version": coordinator.data["system"]["firmware"],
+    hass.data[DOMAIN][entry.entry_id] = {
+        "api": api,
+        "coordinator": coordinator,
     }
 
+    # Forward the setup to platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_update_options))
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    """Unload a config entry."""
+    # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    
     if unload_ok:
-        await coordinator.api.close()
-        hass.data[DOMAIN].pop(entry.entry_id)
+        # Close API session
+        entry_data = hass.data[DOMAIN].pop(entry.entry_id)
+        api = entry_data.get("api")
+        if api:
+            await api.close()
+
     return unload_ok
 
 
-async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload config entry."""
+    await async_unload_entry(hass, entry)
+    await async_setup_entry(hass, entry)
