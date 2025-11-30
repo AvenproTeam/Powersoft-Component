@@ -32,6 +32,18 @@ class PowersoftAPI:
     MATRIX_GAIN = "/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_ch}/Gain-{out_ch}/Value"
     SNAPSHOT_CURRENT = "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
     SNAPSHOT_LOAD = "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value"
+    
+    # Power/Standby control (these paths need verification)
+    POWER_STATE = "/Device/System/PowerState/Value"
+    STANDBY_STATE = "/Device/System/Standby/Value"
+    
+    # Monitoring paths (may vary by model)
+    TEMPERATURE = "/Device/System/Temperature/Value"
+    OUTPUT_VOLTAGE = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Voltage/Value"
+    OUTPUT_CURRENT = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Current/Value"
+    OUTPUT_IMPEDANCE = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Impedance/Value"
+    OUTPUT_SIGNAL = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/SignalPresent/Value"
+    OUTPUT_CLIP = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Clip/Value"
 
     def __init__(
         self,
@@ -481,3 +493,86 @@ class PowersoftAPI:
         except Exception as e:
             _LOGGER.error("Failed to get current snapshot: %s", e, exc_info=True)
             return "Unknown"
+
+    async def power_on(self) -> bool:
+        """Turn on the amplifier (exit standby mode).
+        
+        Returns:
+            True if successful
+        """
+        try:
+            # Try common power state paths
+            # The exact path may vary by model
+            paths_to_try = [
+                self.POWER_STATE,
+                self.STANDBY_STATE,
+                "/Device/System/Control/PowerOn/Value",
+                "/Device/Control/PowerState/Value",
+            ]
+            
+            for path in paths_to_try:
+                try:
+                    values = [
+                        {
+                            "id": path,
+                            "data": {"type": "BOOL", "boolValue": True},
+                        }
+                    ]
+                    
+                    result = await self._am_request("WRITE", values)
+                    response_values = self._parse_response_values(result)
+                    
+                    if response_values and self._check_result_code(response_values[0]):
+                        _LOGGER.info("Amplifier powered on using path: %s", path)
+                        return True
+                except Exception as e:
+                    _LOGGER.debug("Path %s failed: %s", path, e)
+                    continue
+            
+            _LOGGER.warning("Could not find valid power on endpoint")
+            return False
+
+        except Exception as e:
+            _LOGGER.error("Failed to power on: %s", e, exc_info=True)
+            return False
+
+    async def power_off(self) -> bool:
+        """Turn off the amplifier (enter standby mode).
+        
+        Returns:
+            True if successful
+        """
+        try:
+            # Try common power state paths
+            paths_to_try = [
+                self.STANDBY_STATE,
+                self.POWER_STATE,
+                "/Device/System/Control/Standby/Value",
+                "/Device/Control/PowerState/Value",
+            ]
+            
+            for path in paths_to_try:
+                try:
+                    values = [
+                        {
+                            "id": path,
+                            "data": {"type": "BOOL", "boolValue": False},
+                        }
+                    ]
+                    
+                    result = await self._am_request("WRITE", values)
+                    response_values = self._parse_response_values(result)
+                    
+                    if response_values and self._check_result_code(response_values[0]):
+                        _LOGGER.info("Amplifier powered off using path: %s", path)
+                        return True
+                except Exception as e:
+                    _LOGGER.debug("Path %s failed: %s", path, e)
+                    continue
+            
+            _LOGGER.warning("Could not find valid power off endpoint")
+            return False
+
+        except Exception as e:
+            _LOGGER.error("Failed to power off: %s", e, exc_info=True)
+            return False
