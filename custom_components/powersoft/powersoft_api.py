@@ -33,9 +33,8 @@ class PowersoftAPI:
     SNAPSHOT_CURRENT = "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
     SNAPSHOT_LOAD = "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value"
     
-    # Power/Standby control (these paths need verification)
-    POWER_STATE = "/Device/System/PowerState/Value"
-    STANDBY_STATE = "/Device/System/Standby/Value"
+    # Power/Standby control
+    STANDBY_STATE = "/Device/Audio/Presets/Live/Generals/Standby/Value"
     
     # Monitoring paths (may vary by model)
     TEMPERATURE = "/Device/System/Temperature/Value"
@@ -172,11 +171,17 @@ class PowersoftAPI:
                     },
                 ])
 
-            # Also read current snapshot
-            read_values.append({
-                "id": self.SNAPSHOT_CURRENT,
-                "single": True,
-            })
+            # Also read current snapshot and standby state
+            read_values.extend([
+                {
+                    "id": self.SNAPSHOT_CURRENT,
+                    "single": True,
+                },
+                {
+                    "id": self.STANDBY_STATE,
+                    "single": True,
+                }
+            ])
 
             # Make single bulk request
             result = await self._am_request("READ", read_values)
@@ -216,12 +221,20 @@ class PowersoftAPI:
 
                 status_data["channels"]["channels"].append(channel_data)
 
-            # Extract snapshot info (last value)
+            # Extract snapshot info (second to last value)
             if len(response_values) > (self.num_channels * 2):
-                snapshot_data = response_values[-1].get("data", {})
+                snapshot_data = response_values[-2].get("data", {})
                 status_data["system"]["current_snapshot"] = snapshot_data.get(
                     "stringValue", "Unknown"
                 )
+            
+            # Extract standby state (last value)
+            # Note: standby=True means amplifier is in standby (OFF)
+            #       standby=False means amplifier is running (ON)
+            if len(response_values) > (self.num_channels * 2 + 1):
+                standby_data = response_values[-1].get("data", {})
+                is_standby = standby_data.get("boolValue", False)
+                status_data["system"]["power_state"] = "standby" if is_standby else "on"
 
             _LOGGER.info(
                 "Status retrieved: %d channels", len(status_data["channels"]["channels"])
@@ -497,39 +510,27 @@ class PowersoftAPI:
     async def power_on(self) -> bool:
         """Turn on the amplifier (exit standby mode).
         
+        Note: Standby value False = amplifier ON
+        
         Returns:
             True if successful
         """
         try:
-            # Try common power state paths
-            # The exact path may vary by model
-            paths_to_try = [
-                self.POWER_STATE,
-                self.STANDBY_STATE,
-                "/Device/System/Control/PowerOn/Value",
-                "/Device/Control/PowerState/Value",
+            values = [
+                {
+                    "id": self.STANDBY_STATE,
+                    "data": {"type": "BOOL", "boolValue": False},  # False = ON
+                }
             ]
             
-            for path in paths_to_try:
-                try:
-                    values = [
-                        {
-                            "id": path,
-                            "data": {"type": "BOOL", "boolValue": True},
-                        }
-                    ]
-                    
-                    result = await self._am_request("WRITE", values)
-                    response_values = self._parse_response_values(result)
-                    
-                    if response_values and self._check_result_code(response_values[0]):
-                        _LOGGER.info("Amplifier powered on using path: %s", path)
-                        return True
-                except Exception as e:
-                    _LOGGER.debug("Path %s failed: %s", path, e)
-                    continue
+            result = await self._am_request("WRITE", values)
+            response_values = self._parse_response_values(result)
             
-            _LOGGER.warning("Could not find valid power on endpoint")
+            if response_values and self._check_result_code(response_values[0]):
+                _LOGGER.info("Amplifier powered ON (standby disabled)")
+                return True
+            
+            _LOGGER.warning("Power on command failed, result: %s", response_values)
             return False
 
         except Exception as e:
@@ -539,38 +540,27 @@ class PowersoftAPI:
     async def power_off(self) -> bool:
         """Turn off the amplifier (enter standby mode).
         
+        Note: Standby value True = amplifier in STANDBY
+        
         Returns:
             True if successful
         """
         try:
-            # Try common power state paths
-            paths_to_try = [
-                self.STANDBY_STATE,
-                self.POWER_STATE,
-                "/Device/System/Control/Standby/Value",
-                "/Device/Control/PowerState/Value",
+            values = [
+                {
+                    "id": self.STANDBY_STATE,
+                    "data": {"type": "BOOL", "boolValue": True},  # True = STANDBY
+                }
             ]
             
-            for path in paths_to_try:
-                try:
-                    values = [
-                        {
-                            "id": path,
-                            "data": {"type": "BOOL", "boolValue": False},
-                        }
-                    ]
-                    
-                    result = await self._am_request("WRITE", values)
-                    response_values = self._parse_response_values(result)
-                    
-                    if response_values and self._check_result_code(response_values[0]):
-                        _LOGGER.info("Amplifier powered off using path: %s", path)
-                        return True
-                except Exception as e:
-                    _LOGGER.debug("Path %s failed: %s", path, e)
-                    continue
+            result = await self._am_request("WRITE", values)
+            response_values = self._parse_response_values(result)
             
-            _LOGGER.warning("Could not find valid power off endpoint")
+            if response_values and self._check_result_code(response_values[0]):
+                _LOGGER.info("Amplifier powered OFF (standby enabled)")
+                return True
+            
+            _LOGGER.warning("Power off command failed, result: %s", response_values)
             return False
 
         except Exception as e:
