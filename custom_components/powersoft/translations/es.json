@@ -1,0 +1,149 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurar etapa Powersoft",
+        "description": "Introduce los datos de conexión de tu etapa Powersoft.",
+        "data": {
+          "host": "Host",
+          "port": "Puerto",
+          "username": "Usuario",
+          "password": "Contraseña"
+        },
+        "data_description": {
+          "host": "Dirección IP o nombre de host de la etapa.",
+          "username": "Solo si la etapa requiere autenticación.",
+          "password": "Solo si la etapa requiere autenticación."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigurar etapa Powersoft",
+        "data": {
+          "host": "Host",
+          "port": "Puerto",
+          "username": "Usuario",
+          "password": "Contraseña"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se ha podido conectar con la etapa. Comprueba la IP y el puerto.",
+      "invalid_auth": "Usuario o contraseña incorrectos.",
+      "unknown": "Error inesperado."
+    },
+    "abort": {
+      "already_configured": "Esta etapa ya está configurada.",
+      "reconfigure_successful": "La etapa se ha reconfigurado correctamente."
+    }
+  },
+  "entity": {
+    "number": {
+      "gain": {
+        "name": "Canal {channel} ganancia"
+      },
+      "delay": {
+        "name": "Canal {channel} delay"
+      }
+    },
+    "sensor": {
+      "current_snapshot": {
+        "name": "Snapshot actual"
+      },
+      "voltage": {
+        "name": "Canal {channel} tensión"
+      },
+      "current": {
+        "name": "Canal {channel} corriente"
+      },
+      "power": {
+        "name": "Canal {channel} potencia"
+      },
+      "impedance": {
+        "name": "Canal {channel} impedancia"
+      },
+      "speaker": {
+        "name": "Canal {channel} altavoz"
+      },
+      "gain_reduction": {
+        "name": "Canal {channel} reducción de ganancia"
+      },
+      "channel_temperature": {
+        "name": "Canal {channel} temperatura"
+      }
+    },
+    "switch": {
+      "power": {
+        "name": "Encendido"
+      },
+      "mute": {
+        "name": "Canal {channel} mute"
+      },
+      "polarity": {
+        "name": "Canal {channel} polaridad invertida"
+      },
+      "input_mute": {
+        "name": "Entrada {channel} mute"
+      }
+    },
+    "binary_sensor": {
+      "fault": {
+        "name": "Fallo"
+      },
+      "signal": {
+        "name": "Canal {channel} señal"
+      },
+      "clip": {
+        "name": "Canal {channel} clip"
+      },
+      "limiter": {
+        "name": "Canal {channel} limitador"
+      }
+    }
+  },
+  "exceptions": {
+    "command_failed": {
+      "message": "La etapa ha rechazado el comando o no es accesible."
+    },
+    "entry_not_loaded": {
+      "message": "La etapa Powersoft seleccionada no está cargada."
+    }
+  },
+  "services": {
+    "load_snapshot": {
+      "name": "Cargar snapshot",
+      "description": "Recupera un snapshot (preset) guardado en la etapa.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Etapa",
+          "description": "Etapa Powersoft a controlar."
+        },
+        "snapshot": {
+          "name": "Snapshot",
+          "description": "Número de slot del snapshot a cargar."
+        }
+      }
+    },
+    "set_matrix_gain": {
+      "name": "Ganancia de matriz",
+      "description": "Ajusta la ganancia de enrutado de una entrada a un canal de salida.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Etapa",
+          "description": "Etapa Powersoft a controlar."
+        },
+        "input": {
+          "name": "Entrada",
+          "description": "Número de canal de entrada."
+        },
+        "output": {
+          "name": "Salida",
+          "description": "Número de canal de salida."
+        },
+        "gain": {
+          "name": "Ganancia",
+          "description": "Ganancia lineal de 0 (apagado) a 1 (0 dB)."
+        }
+      }
+    }
+  }
+}

@@ -2,21 +2,148 @@
   "config": {
     "step": {
       "user": {
-        "title": "Configure Powersoft Amplifier",
-        "description": "Enter the connection details for your Powersoft amplifier",
+        "title": "Configure Powersoft amplifier",
+        "description": "Enter the connection details of your Powersoft amplifier.",
         "data": {
-          "host": "Host (IP Address)",
+          "host": "Host",
           "port": "Port",
-          "username": "Username (optional)",
-          "password": "Password (optional)"
+          "username": "Username",
+          "password": "Password"
+        },
+        "data_description": {
+          "host": "IP address or hostname of the amplifier.",
+          "username": "Only needed if the amplifier requires authentication.",
+          "password": "Only needed if the amplifier requires authentication."
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Powersoft amplifier",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password"
         }
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the amplifier. Please check the IP address and port."
+      "cannot_connect": "Failed to connect to the amplifier. Check the IP address and port.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "Unexpected error."
     },
     "abort": {
-      "already_configured": "This amplifier is already configured"
+      "already_configured": "This amplifier is already configured.",
+      "reconfigure_successful": "The amplifier was reconfigured successfully."
+    }
+  },
+  "entity": {
+    "number": {
+      "gain": {
+        "name": "Channel {channel} gain"
+      },
+      "delay": {
+        "name": "Channel {channel} delay"
+      }
+    },
+    "sensor": {
+      "current_snapshot": {
+        "name": "Current snapshot"
+      },
+      "voltage": {
+        "name": "Channel {channel} voltage"
+      },
+      "current": {
+        "name": "Channel {channel} current"
+      },
+      "power": {
+        "name": "Channel {channel} power"
+      },
+      "impedance": {
+        "name": "Channel {channel} impedance"
+      },
+      "speaker": {
+        "name": "Channel {channel} speaker"
+      },
+      "gain_reduction": {
+        "name": "Channel {channel} gain reduction"
+      },
+      "channel_temperature": {
+        "name": "Channel {channel} temperature"
+      }
+    },
+    "switch": {
+      "power": {
+        "name": "Power"
+      },
+      "mute": {
+        "name": "Channel {channel} mute"
+      },
+      "polarity": {
+        "name": "Channel {channel} polarity inverted"
+      },
+      "input_mute": {
+        "name": "Input {channel} mute"
+      }
+    },
+    "binary_sensor": {
+      "fault": {
+        "name": "Fault"
+      },
+      "signal": {
+        "name": "Channel {channel} signal"
+      },
+      "clip": {
+        "name": "Channel {channel} clip"
+      },
+      "limiter": {
+        "name": "Channel {channel} limiter"
+      }
+    }
+  },
+  "exceptions": {
+    "command_failed": {
+      "message": "The amplifier rejected the command or could not be reached."
+    },
+    "entry_not_loaded": {
+      "message": "The selected Powersoft amplifier is not loaded."
+    }
+  },
+  "services": {
+    "load_snapshot": {
+      "name": "Load snapshot",
+      "description": "Recall a snapshot (preset) stored in the amplifier.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Amplifier",
+          "description": "Powersoft amplifier to control."
+        },
+        "snapshot": {
+          "name": "Snapshot",
+          "description": "Snapshot slot number to load."
+        }
+      }
+    },
+    "set_matrix_gain": {
+      "name": "Set matrix gain",
+      "description": "Set the routing gain from an input to an output channel.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Amplifier",
+          "description": "Powersoft amplifier to control."
+        },
+        "input": {
+          "name": "Input",
+          "description": "Input channel number."
+        },
+        "output": {
+          "name": "Output",
+          "description": "Output channel number."
+        },
+        "gain": {
+          "name": "Gain",
+          "description": "Linear gain from 0 (off) to 1 (0 dB)."
+        }
+      }
     }
   }
 }

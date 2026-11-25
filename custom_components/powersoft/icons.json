@@ -1,0 +1,71 @@
+{
+  "entity": {
+    "number": {
+      "gain": {
+        "default": "mdi:volume-high"
+      },
+      "delay": {
+        "default": "mdi:timer-outline"
+      }
+    },
+    "sensor": {
+      "current_snapshot": {
+        "default": "mdi:playlist-music"
+      },
+      "impedance": {
+        "default": "mdi:omega"
+      },
+      "speaker": {
+        "default": "mdi:speaker"
+      },
+      "gain_reduction": {
+        "default": "mdi:arrow-collapse-down"
+      }
+    },
+    "switch": {
+      "power": {
+        "default": "mdi:power",
+        "state": {
+          "off": "mdi:power-standby"
+        }
+      },
+      "mute": {
+        "default": "mdi:volume-high",
+        "state": {
+          "on": "mdi:volume-off"
+        }
+      },
+      "polarity": {
+        "default": "mdi:sine-wave"
+      },
+      "input_mute": {
+        "default": "mdi:microphone",
+        "state": {
+          "on": "mdi:microphone-off"
+        }
+      }
+    },
+    "binary_sensor": {
+      "signal": {
+        "default": "mdi:waveform",
+        "state": {
+          "off": "mdi:signal-off"
+        }
+      },
+      "clip": {
+        "default": "mdi:alert-octagon-outline"
+      },
+      "limiter": {
+        "default": "mdi:arrow-collapse-vertical"
+      }
+    }
+  },
+  "services": {
+    "load_snapshot": {
+      "service": "mdi:playlist-play"
+    },
+    "set_matrix_gain": {
+      "service": "mdi:matrix"
+    }
+  }
+}

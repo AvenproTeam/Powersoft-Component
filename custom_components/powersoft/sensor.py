@@ -1,198 +1,155 @@
 """Sensor platform for Powersoft amplifiers."""
 from __future__ import annotations
 
-import logging
-
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
+    SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    EntityCategory,
     UnitOfElectricCurrent,
     UnitOfElectricPotential,
-    UnitOfTemperature,
     UnitOfPower,
+    UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .coordinator import PowersoftConfigEntry, PowersoftCoordinator
+from .entity import PowersoftChannelEntity, PowersoftEntity, PowersoftLiveMixin
 
-_LOGGER = logging.getLogger(__name__)
+SNAPSHOT_SENSOR = SensorEntityDescription(
+    key="current_snapshot",
+    translation_key="current_snapshot",
+)
+TEMPERATURE_SENSOR = SensorEntityDescription(
+    key="temperature",
+    device_class=SensorDeviceClass.TEMPERATURE,
+    state_class=SensorStateClass.MEASUREMENT,
+    native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+)
+SPEAKER_SENSOR = SensorEntityDescription(
+    key="speaker",
+    translation_key="speaker",
+    entity_category=EntityCategory.DIAGNOSTIC,
+)
+
+# Socket.IO ``meters.output_process`` / ``slows.ampli`` readings per channel.
+LIVE_CHANNEL_SENSORS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="voltage",
+        translation_key="voltage",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+        suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
+        key="current",
+        translation_key="current",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        suggested_display_precision=2,
+        entity_registry_enabled_default=False,
+    ),
+    SensorEntityDescription(
+        key="power",
+        translation_key="power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="impedance",
+        translation_key="impedance",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="Ω",
+        suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
+        key="gain_reduction",
+        translation_key="gain_reduction",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement="dB",
+        suggested_display_precision=1,
+    ),
+    SensorEntityDescription(
+        key="temperature",
+        translation_key="channel_temperature",
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        suggested_display_precision=1,
+    ),
+)
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    entry: PowersoftConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Powersoft sensor entities."""
-    data = hass.data[DOMAIN][config_entry.entry_id]
-    coordinator = data["coordinator"]
-
-    entities = []
-    
-    # Add system temperature sensor
-    entities.append(PowersoftTemperatureSensor(coordinator, config_entry.entry_id))
-    
-    # Add channel-specific sensors
-    channels = coordinator.data.get("channels", {})
-    if isinstance(channels, dict):
-        channel_list = channels.get("channels", [])
-        for channel in channel_list:
-            channel_num = channel.get("number")
-            if channel_num is not None:
-                entities.extend([
-                    PowersoftChannelVoltageSensor(coordinator, channel_num, config_entry.entry_id),
-                    PowersoftChannelCurrentSensor(coordinator, channel_num, config_entry.entry_id),
-                    PowersoftChannelPowerSensor(coordinator, channel_num, config_entry.entry_id),
-                    PowersoftChannelImpedanceSensor(coordinator, channel_num, config_entry.entry_id),
-                ])
-
-    _LOGGER.info("Adding %d sensor entities", len(entities))
+    """Set up Powersoft sensors."""
+    coordinator = entry.runtime_data
+    entities: list[SensorEntity] = [
+        PowersoftSnapshotSensor(coordinator, SNAPSHOT_SENSOR),
+        PowersoftTemperatureSensor(coordinator, TEMPERATURE_SENSOR),
+    ]
+    for channel in coordinator.data["channels"]:
+        entities.append(PowersoftSpeakerSensor(coordinator, channel, SPEAKER_SENSOR))
+        entities.extend(
+            PowersoftLiveChannelSensor(coordinator, channel, d)
+            for d in LIVE_CHANNEL_SENSORS
+        )
     async_add_entities(entities)
 
 
-class PowersoftSensorBase(CoordinatorEntity, SensorEntity):
-    """Base class for Powersoft sensors."""
+class PowersoftSnapshotSensor(PowersoftEntity, SensorEntity):
+    """Snapshot (preset) currently loaded."""
 
-    _attr_has_entity_name = True
-
-    def __init__(self, coordinator, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self._entry_id = entry_id
+    def __init__(
+        self, coordinator: PowersoftCoordinator, description: SensorEntityDescription
+    ) -> None:
+        super().__init__(coordinator, description.key)
+        self.entity_description = description
 
     @property
-    def device_info(self):
-        """Return device information."""
-        system_info = self.coordinator.data.get("system", {})
-        return {
-            "identifiers": {(DOMAIN, self._entry_id)},
-            "name": f"Powersoft {system_info.get('model', 'Amplifier')}",
-            "manufacturer": "Powersoft",
-            "model": system_info.get("model", "Quattrocanali 8804 DSP"),
-            "sw_version": system_info.get("firmware", "Unknown"),
-        }
+    def native_value(self) -> str | None:
+        return self.system.get("current_snapshot")
 
 
-class PowersoftTemperatureSensor(PowersoftSensorBase):
-    """Temperature sensor for the amplifier."""
-
-    _attr_device_class = SensorDeviceClass.TEMPERATURE
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_name = "Temperature"
-
-    def __init__(self, coordinator, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, entry_id)
-        self._attr_unique_id = f"{entry_id}_temperature"
+class PowersoftTemperatureSensor(PowersoftLiveMixin, PowersoftSnapshotSensor):
+    """Hottest amplifier module temperature (live)."""
 
     @property
     def native_value(self) -> float | None:
-        """Return the temperature value."""
-        system_info = self.coordinator.data.get("system", {})
-        return system_info.get("temperature")
+        return self.system.get("temperature")
 
 
-class PowersoftChannelSensorBase(PowersoftSensorBase):
-    """Base class for channel-specific sensors."""
+class PowersoftSpeakerSensor(PowersoftChannelEntity, SensorEntity):
+    """Speaker model assigned to the output channel."""
 
-    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, entry_id)
-        self._channel = channel
+    def __init__(
+        self,
+        coordinator: PowersoftCoordinator,
+        channel: int,
+        description: SensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator, channel, description.key)
+        self.entity_description = description
 
-    def _get_channel_data(self) -> dict | None:
-        """Get data for this channel."""
-        channels = self.coordinator.data.get("channels", {})
-        if isinstance(channels, dict):
-            channel_list = channels.get("channels", [])
-            for channel in channel_list:
-                if channel.get("number") == self._channel:
-                    return channel
-        return None
+    @property
+    def native_value(self) -> str | None:
+        return self.channel_data.get("speaker")
 
 
-class PowersoftChannelVoltageSensor(PowersoftChannelSensorBase):
-    """Voltage sensor for a channel."""
-
-    _attr_device_class = SensorDeviceClass.VOLTAGE
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfElectricPotential.VOLT
-
-    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, channel, entry_id)
-        self._attr_unique_id = f"{entry_id}_ch{channel}_voltage"
-        self._attr_name = f"Channel {channel} Voltage"
+class PowersoftLiveChannelSensor(PowersoftLiveMixin, PowersoftSpeakerSensor):
+    """Per-channel live meter."""
 
     @property
     def native_value(self) -> float | None:
-        """Return the voltage value."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("voltage") if channel_data else None
-
-
-class PowersoftChannelCurrentSensor(PowersoftChannelSensorBase):
-    """Current sensor for a channel."""
-
-    _attr_device_class = SensorDeviceClass.CURRENT
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfElectricCurrent.AMPERE
-
-    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, channel, entry_id)
-        self._attr_unique_id = f"{entry_id}_ch{channel}_current"
-        self._attr_name = f"Channel {channel} Current"
-
-    @property
-    def native_value(self) -> float | None:
-        """Return the current value."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("current") if channel_data else None
-
-
-class PowersoftChannelPowerSensor(PowersoftChannelSensorBase):
-    """Power sensor for a channel."""
-
-    _attr_device_class = SensorDeviceClass.POWER
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = UnitOfPower.WATT
-
-    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, channel, entry_id)
-        self._attr_unique_id = f"{entry_id}_ch{channel}_power"
-        self._attr_name = f"Channel {channel} Power"
-
-    @property
-    def native_value(self) -> float | None:
-        """Return the power value."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("power") if channel_data else None
-
-
-class PowersoftChannelImpedanceSensor(PowersoftChannelSensorBase):
-    """Impedance sensor for a channel."""
-
-    _attr_state_class = SensorStateClass.MEASUREMENT
-    _attr_native_unit_of_measurement = "Ω"
-    _attr_icon = "mdi:omega"
-
-    def __init__(self, coordinator, channel: int, entry_id: str) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator, channel, entry_id)
-        self._attr_unique_id = f"{entry_id}_ch{channel}_impedance"
-        self._attr_name = f"Channel {channel} Impedance"
-
-    @property
-    def native_value(self) -> float | None:
-        """Return the impedance value."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("impedance") if channel_data else None
+        return self.live_data.get(self.entity_description.key)

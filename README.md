@@ -1,3 +1,5 @@
+<p align="center"><img src="custom_components/powersoft/brand/icon@2x.png" width="128" alt="Powersoft"></p>
+
 # Powersoft Amplifiers Integration for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
@@ -7,19 +9,17 @@ Integración personalizada para Home Assistant que permite monitorizar y control
 
 ## Características
 
-- ✅ Control de volumen (ganancia) por canal
-- ✅ Mute/Unmute de canales individuales
-- ✅ Control de polaridad (inversión de fase)
-- ✅ Ajuste de delay por canal
-- ✅ Monitorización en tiempo real:
-  - Temperatura del amplificador
-  - Voltaje, corriente y potencia por canal
-  - Impedancia de carga
-  - Detección de señal
-  - Detección de clipping
-- ✅ Control de encendido/standby
-- ✅ Carga de snapshots/presets
-- ✅ Soporte para múltiples canales
+- ✅ Encendido / standby de la etapa
+- ✅ Mute por canal de salida (y de entrada, desactivado por defecto)
+- ✅ Ganancia y delay por canal, inversión de polaridad (si el modelo lo expone)
+- ✅ Snapshot activo y servicio para cargar snapshots
+- ✅ Nombre del altavoz asignado a cada canal
+- ✅ **Medidores en vivo** (Socket.IO, igual que la Web App de la etapa): tensión, corriente, potencia, impedancia, reducción de ganancia, temperatura, señal, clip, limitador y fallos
+- ✅ Modelo, firmware, número de serie y número de canales detectados automáticamente
+- ✅ Entidades «no disponibles» cuando la etapa no responde
+- ✅ Logo de Powersoft en Home Assistant (requiere HA 2026.3 o superior)
+
+Probado en campo con una **Quattrocanali 4804 DSP** (firmware 1.12.0.696).
 
 ## Modelos compatibles
 
@@ -61,49 +61,57 @@ Esta integración ha sido diseñada para trabajar con:
 4. Introduce los datos de conexión:
    - **Host**: Dirección IP del amplificador
    - **Puerto**: Puerto HTTP (por defecto 80)
-   - **Usuario** (opcional): Si el amplificador tiene autenticación
-   - **Contraseña** (opcional): Si el amplificador tiene autenticación
+   - **Usuario / Contraseña** (opcional): Si el amplificador tiene autenticación
+
+La conexión se valida al añadirla, y el modelo y el número de canales se detectan solos. La etapa se identifica por su número de serie, así que si cambia de IP usa **Reconfigurar** en la tarjeta de la integración.
+
+## Cómo se comunica
+
+| Canal | Uso |
+|---|---|
+| `POST http://<ip>/am` (API Agile) | Lectura y escritura de mute, ganancia, standby, snapshot, altavoces (cada 5 s) |
+| Socket.IO `ws://<ip>/socket.io/?EIO=3` | Medidores en vivo (`status-update`: `meters` y `slows`) |
 
 ## Entidades creadas
 
-### Media Player (por canal)
-- Control de volumen (ganancia en dB)
-- Mute/Unmute
-- Estado de reproducción
+| Entidad | Tipo | Origen |
+|---|---|---|
+| Power | Switch | `/am` |
+| Canal N mute | Switch | `/am` |
+| Entrada N mute | Switch (desactivado por defecto) | `/am` |
+| Canal N polaridad invertida | Switch (config) | `/am`, si el modelo lo expone |
+| Canal N ganancia / delay | Number | `/am` (delay si el modelo lo expone) |
+| Snapshot actual | Sensor | `/am` |
+| Canal N altavoz | Sensor (diagnóstico) | `/am` |
+| Temperatura | Sensor | En vivo |
+| Canal N tensión / corriente / potencia / impedancia / reducción de ganancia / temperatura | Sensor | En vivo |
+| Canal N señal / clip / limitador | Binary sensor | En vivo |
+| Fallo | Binary sensor (diagnóstico) | En vivo |
 
-### Sensores
-- Temperatura del amplificador (°C)
-- Voltaje por canal (V)
-- Corriente por canal (A)
-- Potencia por canal (W)
-- Impedancia por canal (Ω)
-
-### Switches
-- Power: Encendido/Standby del amplificador
-- Polaridad invertida por canal
-
-### Controles numéricos
-- Ganancia por canal: -80 a 0 dB
-- Delay por canal: 0 a 500 ms
+Si la conexión Socket.IO no está disponible, las entidades en vivo aparecen como «no disponibles» y el resto sigue funcionando.
 
 ## Uso
 
-### Control básico
+### Ejemplos
 
 ```yaml
-# Ajustar volumen del canal 1 al 50%
-service: media_player.volume_set
+# Mute del canal 2
+action: switch.turn_on
 target:
-  entity_id: media_player.powersoft_channel_1
-data:
-  volume_level: 0.5
+  entity_id: switch.powersoft_192_168_1_50_channel_2_mute
 
-# Silenciar canal 2
-service: media_player.volume_mute
+# Ganancia del canal 1 a -12 dB
+action: number.set_value
 target:
-  entity_id: media_player.powersoft_channel_2
+  entity_id: number.powersoft_192_168_1_50_channel_1_gain
 data:
-  is_volume_muted: true
+  value: -12
+
+# Cargar el snapshot 3
+action: powersoft.load_snapshot
+data:
+  config_entry_id: <id de la integración>
+  snapshot: 3
 ```
 
 ## Troubleshooting
@@ -118,8 +126,8 @@ data:
 - Algunos amplificadores tienen un modo "Control Lock" que debe estar desactivado
 - Comprueba que ArmoníaPlus no esté conectado simultáneamente
 
-### Necesitas adaptar la API
-Este componente usa endpoints genéricos. Si tu modelo de amplificador usa diferentes rutas API, edita el archivo `powersoft_api.py` con los endpoints correctos para tu hardware.
+### Los medidores en vivo aparecen como «no disponibles»
+- Comprueba que la Web App de la etapa (`http://<ip>`) funciona desde la red de Home Assistant: los medidores usan el mismo WebSocket.
 
 ## Contribuciones
 

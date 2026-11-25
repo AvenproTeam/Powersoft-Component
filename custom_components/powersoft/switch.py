@@ -1,145 +1,155 @@
 """Switch platform for Powersoft amplifiers."""
 from __future__ import annotations
 
-import logging
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+from .coordinator import PowersoftConfigEntry, PowersoftCoordinator
+from .entity import PowersoftChannelEntity, PowersoftEntity
+from .powersoft_api import PowersoftAPI, PowersoftError
 
-_LOGGER = logging.getLogger(__name__)
+
+@dataclass(frozen=True, kw_only=True)
+class PowersoftChannelSwitchDescription(SwitchEntityDescription):
+    """Describe a per-channel switch."""
+
+    value_key: str
+    setter: Callable[[PowersoftAPI, int, bool], Awaitable[bool]]
+
+
+CHANNEL_SWITCHES: tuple[PowersoftChannelSwitchDescription, ...] = (
+    PowersoftChannelSwitchDescription(
+        key="mute",
+        translation_key="mute",
+        value_key="mute",
+        setter=lambda api, ch, on: api.set_mute(ch, on),
+    ),
+    PowersoftChannelSwitchDescription(
+        key="input_mute",
+        translation_key="input_mute",
+        value_key="input_mute",
+        entity_registry_enabled_default=False,
+        setter=lambda api, ch, on: api.set_input_mute(ch, on),
+    ),
+    PowersoftChannelSwitchDescription(
+        key="polarity",
+        translation_key="polarity",
+        value_key="polarity_inverted",
+        entity_category=EntityCategory.CONFIG,
+        setter=lambda api, ch, on: api.set_polarity(ch, on),
+    ),
+)
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    entry: PowersoftConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Powersoft switch entities."""
-    data = hass.data[DOMAIN][config_entry.entry_id]
-    coordinator = data["coordinator"]
-    api = data["api"]
-
-    entities = []
-    
-    # Add main power/standby switch
-    entities.append(PowersoftPowerSwitch(coordinator, api, config_entry.entry_id))
-    
-    # Add polarity switches for each channel
-    channels = coordinator.data.get("channels", {})
-    if isinstance(channels, dict):
-        channel_list = channels.get("channels", [])
-        for channel in channel_list:
-            channel_num = channel.get("number")
-            if channel_num is not None:
-                entities.append(PowersoftPolaritySwitch(coordinator, api, channel_num, config_entry.entry_id))
-
-    _LOGGER.info("Adding %d switch entities", len(entities))
+    """Set up Powersoft switches."""
+    coordinator = entry.runtime_data
+    entities: list[SwitchEntity] = [PowersoftPowerSwitch(coordinator)]
+    entities.extend(
+        PowersoftChannelSwitch(coordinator, channel, description)
+        for channel in coordinator.data["channels"]
+        for description in CHANNEL_SWITCHES
+    )
     async_add_entities(entities)
 
 
-class PowersoftSwitchBase(CoordinatorEntity, SwitchEntity):
-    """Base class for Powersoft switches."""
-
-    _attr_has_entity_name = True
-
-    def __init__(self, coordinator, api, entry_id: str) -> None:
-        """Initialize the switch."""
-        super().__init__(coordinator)
-        self._api = api
-        self._entry_id = entry_id
-
-    @property
-    def device_info(self):
-        """Return device information."""
-        system_info = self.coordinator.data.get("system", {})
-        return {
-            "identifiers": {(DOMAIN, self._entry_id)},
-            "name": f"Powersoft {system_info.get('model', 'Amplifier')}",
-            "manufacturer": "Powersoft",
-            "model": system_info.get("model", "Quattrocanali 8804 DSP"),
-            "sw_version": system_info.get("firmware", "Unknown"),
-        }
+async def _run(
+    coordinator: PowersoftCoordinator,
+    command: Awaitable[bool],
+    apply: Callable[[], None],
+) -> None:
+    """Send a command, reflect it immediately, then confirm with a refresh."""
+    try:
+        ok = await command
+    except PowersoftError as err:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN, translation_key="command_failed"
+        ) from err
+    if not ok:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN, translation_key="command_failed"
+        )
+    apply()
+    coordinator.async_update_listeners()
+    await coordinator.async_request_refresh()
 
 
-class PowersoftPowerSwitch(PowersoftSwitchBase):
-    """Switch to control amplifier power state (standby/on)."""
+class PowersoftPowerSwitch(PowersoftEntity, SwitchEntity):
+    """Amplifier power (on / standby)."""
 
-    _attr_icon = "mdi:power"
-    _attr_name = "Power"
+    _attr_translation_key = "power"
 
-    def __init__(self, coordinator, api, entry_id: str) -> None:
-        """Initialize the switch."""
-        super().__init__(coordinator, api, entry_id)
-        self._attr_unique_id = f"{entry_id}_power"
+    def __init__(self, coordinator: PowersoftCoordinator) -> None:
+        super().__init__(coordinator, "power")
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the amplifier is on (not in standby)."""
-        system_info = self.coordinator.data.get("system", {})
-        power_state = system_info.get("power_state", "on")
-        return power_state == "on"
+    def is_on(self) -> bool | None:
+        standby = self.system.get("standby")
+        return None if standby is None else not standby
+
+    async def _set(self, on: bool) -> None:
+        def apply() -> None:
+            self.system["standby"] = not on
+            self.system["power_state"] = "on" if on else "standby"
+
+        await _run(self.coordinator, self.coordinator.api.set_standby(not on), apply)
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the amplifier (exit standby)."""
-        _LOGGER.info("Turning amplifier ON (exiting standby)")
-        success = await self._api.power_on()
-        if success:
-            await self.coordinator.async_request_refresh()
-        else:
-            _LOGGER.warning("Failed to turn amplifier on")
+        await self._set(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Turn off the amplifier (enter standby)."""
-        _LOGGER.info("Turning amplifier OFF (entering standby)")
-        success = await self._api.power_off()
-        if success:
-            await self.coordinator.async_request_refresh()
-        else:
-            _LOGGER.warning("Failed to turn amplifier off")
+        await self._set(False)
 
 
-class PowersoftPolaritySwitch(PowersoftSwitchBase):
-    """Switch to control channel polarity."""
+class PowersoftChannelSwitch(PowersoftChannelEntity, SwitchEntity):
+    """Per-channel boolean parameter (mute, polarity)."""
 
-    _attr_icon = "mdi:sine-wave"
+    entity_description: PowersoftChannelSwitchDescription
 
-    def __init__(self, coordinator, api, channel: int, entry_id: str) -> None:
-        """Initialize the switch."""
-        super().__init__(coordinator, api, entry_id)
-        self._channel = channel
-        self._attr_unique_id = f"{entry_id}_ch{channel}_polarity"
-        self._attr_name = f"Channel {channel} Polarity Inverted"
+    def __init__(
+        self,
+        coordinator: PowersoftCoordinator,
+        channel: int,
+        description: PowersoftChannelSwitchDescription,
+    ) -> None:
+        super().__init__(coordinator, channel, description.key)
+        self.entity_description = description
 
     @property
-    def is_on(self) -> bool:
-        """Return true if polarity is inverted."""
-        channel_data = self._get_channel_data()
-        return channel_data.get("polarity") == "inverted" if channel_data else False
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.channel_data.get(self.entity_description.value_key) is not None
+        )
 
-    def _get_channel_data(self) -> dict | None:
-        """Get data for this channel."""
-        channels = self.coordinator.data.get("channels", {})
-        if isinstance(channels, dict):
-            channel_list = channels.get("channels", [])
-            for channel in channel_list:
-                if channel.get("number") == self._channel:
-                    return channel
-        return None
+    @property
+    def is_on(self) -> bool | None:
+        return self.channel_data.get(self.entity_description.value_key)
+
+    async def _set(self, on: bool) -> None:
+        def apply() -> None:
+            self.channel_data[self.entity_description.value_key] = on
+
+        await _run(
+            self.coordinator,
+            self.entity_description.setter(self.coordinator.api, self._channel, on),
+            apply,
+        )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Invert the polarity."""
-        success = await self._api.set_polarity(self._channel, True)
-        if success:
-            await self.coordinator.async_request_refresh()
+        await self._set(True)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Set polarity to normal."""
-        success = await self._api.set_polarity(self._channel, False)
-        if success:
-            await self.coordinator.async_request_refresh()
+        await self._set(False)

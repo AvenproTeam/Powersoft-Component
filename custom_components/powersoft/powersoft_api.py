@@ -1,30 +1,77 @@
-"""Powersoft API client for Quattrocanali amplifiers.
+"""Powersoft API client (Quattrocanali / X / T / Unica Web App HTTP API).
 
-Based on the Bitfocus Companion module implementation and reverse-engineered
-from the Powersoft Web App HTTP API.
+All communication happens through POST requests to the ``/am`` endpoint with a
+JSON payload describing a READ or WRITE action over hierarchical parameter IDs,
+for example::
+
+    /Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{N}/Mute/Value
+
+Channel indexes on the wire are 0-based; this client exposes 1-based channels.
 """
-import asyncio
+from __future__ import annotations
+
+from enum import IntEnum
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
+API_VERSION = "1.0.0"
+CLIENT_ID = "homeassistant-powersoft"
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=10)
+
+# Agile protocol codes (same as the embedded Web App)
+PAYLOAD_ACTION = 100
+ACTION_READ = 10
+ACTION_WRITE = 20
+RESULT_OK = 10
+
+
+class ValueType(IntEnum):
+    """``data.type`` codes and the field that carries each value."""
+
+    STRING = 10
+    FLOAT = 20
+    INT = 30
+    BOOL = 40
+    FLOAT_ARRAY = 50
+    UINT = 60
+
+
+VALUE_FIELDS = {
+    ValueType.STRING: "stringValue",
+    ValueType.FLOAT: "floatValue",
+    ValueType.INT: "intValue",
+    ValueType.BOOL: "boolValue",
+    ValueType.FLOAT_ARRAY: "floatArrayValue",
+    ValueType.UINT: "uintValue",
+}
+
+
+class PowersoftError(Exception):
+    """Base error for the Powersoft API."""
+
+
+class PowersoftConnectionError(PowersoftError):
+    """The amplifier could not be reached or returned an invalid response."""
+
+
+class PowersoftAuthError(PowersoftError):
+    """The amplifier rejected the credentials."""
+
 
 class PowersoftAPI:
-    """Client for Powersoft Quattrocanali amplifier Web App API.
-    
-    The Powersoft API uses a hierarchical ID system with READ/WRITE actions.
-    All communication happens through POST requests to /am endpoint with JSON payloads.
-    
-    Example paths:
-    - /Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{N}/Mute/Value
-    - /Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{N}/Gain/Value
-    - /Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{N}/Gain-{M}/Value
-    """
+    """Client for the Powersoft amplifier Web App API."""
 
-    # Common parameter paths
+    # Identity
+    DEVICE_NAME = "/Device/Config/Name"
+    FIRMWARE = "/Device/Config/Software/Firmware/Version"
+    SERIAL = "/Device/Config/Hardware/Model/Serial"
+    CHANNEL_COUNT = "/Device/Config/Hardware/Channels"
+
+    # Control parameters
     OUTPUT_MUTE = "/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Mute/Value"
     OUTPUT_GAIN = "/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Gain/Value"
     OUTPUT_POLARITY = "/Device/Audio/Presets/Live/OutputProcess/Channels/Channel-{ch}/Polarity/Value"
@@ -32,537 +79,329 @@ class PowersoftAPI:
     MATRIX_GAIN = "/Device/Audio/Presets/Live/InputMatrix/Channels/Channel-{in_ch}/Gain-{out_ch}/Value"
     SNAPSHOT_CURRENT = "/Device/Audio/Presets/Live/ReadOnly/SnapshotSlotId/Current"
     SNAPSHOT_LOAD = "/Device/Audio/Presets/Live/Control/LoadSnapshot/Value"
-    
-    # Power/Standby control
     STANDBY_STATE = "/Device/Audio/Presets/Live/Generals/Standby/Value"
-    
-    # Monitoring paths (may vary by model)
-    TEMPERATURE = "/Device/System/Temperature/Value"
-    OUTPUT_VOLTAGE = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Voltage/Value"
-    OUTPUT_CURRENT = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Current/Value"
-    OUTPUT_IMPEDANCE = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Impedance/Value"
-    OUTPUT_SIGNAL = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/SignalPresent/Value"
-    OUTPUT_CLIP = "/Device/Audio/ReadOnly/OutputChannels/Channel-{ch}/Clip/Value"
+    INPUT_MUTE = "/Device/Audio/Presets/Live/InputProcess/Channels/Channel-{ch}/Mute/Value"
+    SPEAKER_NAME = "/Device/Audio/Presets/Live/SpeakerLayout/Speaker-{ch}/ModelName"
+
+    # Gain is exchanged as a normalised 0..1 value mapped to -80..0 dB
+    GAIN_MIN_DB = -80.0
+    GAIN_MAX_DB = 0.0
 
     def __init__(
         self,
         host: str,
         port: int = 80,
-        username: Optional[str] = None,
-        password: Optional[str] = None,
-        num_channels: int = 4,  # Quattrocanali has 4 channels
-    ):
+        username: str | None = None,
+        password: str | None = None,
+        num_channels: int = 4,
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
         """Initialize the API client.
-        
-        Args:
-            host: Amplifier IP address
-            port: HTTP port (default 80)
-            username: Optional authentication username
-            password: Optional authentication password
-            num_channels: Number of output channels (4 for Quattrocanali 8804)
+
+        If ``session`` is given (Home Assistant's shared session) it is reused
+        and never closed by this client.
         """
         self.host = host
         self.port = port
-        self.username = username
-        self.password = password
         self.num_channels = num_channels
         self.base_url = f"http://{host}:{port}"
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._client_id = "homeassistant-powersoft"
+        self._auth = (
+            aiohttp.BasicAuth(username, password) if username and password else None
+        )
+        self._session = session
+        self._owns_session = session is None
+        # None = not probed yet, False = model does not expose these paths
+        self._optional_supported: dict[str, bool] = {}
+
+    # ------------------------------------------------------------------ helpers
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
         if self._session is None or self._session.closed:
-            auth = None
-            if self.username and self.password:
-                auth = aiohttp.BasicAuth(self.username, self.password)
-            self._session = aiohttp.ClientSession(
-                auth=auth,
-                timeout=aiohttp.ClientTimeout(total=10),
-                headers={"Content-Type": "application/json"},
-            )
+            self._session = aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT)
+            self._owns_session = True
         return self._session
 
-    async def close(self):
-        """Close the API client."""
-        if self._session and not self._session.closed:
+    async def close(self) -> None:
+        """Close the HTTP session if this client created it."""
+        if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
 
-    async def _am_request(self, action_type: str, values: List[Dict]) -> Dict:
-        """Make request to /am endpoint.
-        
-        Args:
-            action_type: "READ" or "WRITE"
-            values: List of value dictionaries
-            
-        Returns:
-            JSON response from amplifier
-            
-        Raises:
-            aiohttp.ClientError: On HTTP errors
-        """
+    async def _am_request(self, action_type: int, values: list[dict]) -> list[dict]:
+        """POST an action to ``/am`` and return the response ``values`` list."""
         session = await self._get_session()
-        url = f"{self.base_url}/am"
-
         payload = {
-            "clientId": self._client_id,
+            "version": API_VERSION,
+            "clientId": CLIENT_ID,
             "payload": {
-                "type": "ACTION",
+                "type": PAYLOAD_ACTION,
                 "action": {"type": action_type, "values": values},
             },
         }
-
+        _LOGGER.debug("POST %s/am %s", self.base_url, payload)
         try:
-            _LOGGER.debug("POST %s: %s", url, payload)
-            async with session.post(url, json=payload) as response:
+            async with session.post(
+                f"{self.base_url}/am",
+                json=payload,
+                auth=self._auth,
+                timeout=DEFAULT_TIMEOUT,
+            ) as response:
+                if response.status in (401, 403):
+                    raise PowersoftAuthError(f"Authentication failed ({response.status})")
                 response.raise_for_status()
-                result = await response.json()
-                _LOGGER.debug("Response: %s", result)
-                return result
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Request failed: %s", err)
+                result = await response.json(content_type=None)
+        except PowersoftError:
             raise
-        except Exception as err:
-            _LOGGER.error("Unexpected error: %s", err, exc_info=True)
-            raise
+        except (aiohttp.ClientError, TimeoutError, ValueError) as err:
+            raise PowersoftConnectionError(
+                f"Error communicating with {self.host}: {err}"
+            ) from err
 
-    def _parse_response_values(self, result: Dict) -> List[Dict]:
-        """Extract values array from response."""
+        _LOGGER.debug("Response: %s", result)
+        if not isinstance(result, dict):
+            raise PowersoftConnectionError("Unexpected response format")
+        values_out = result.get("payload", {}).get("action", {}).get("values", [])
+        return values_out if isinstance(values_out, list) else []
+
+    @staticmethod
+    def _ok(value: dict | None) -> bool:
+        """Return True if a response value reports success (or has no code)."""
+        return bool(value) and value.get("result", RESULT_OK) == RESULT_OK
+
+    @staticmethod
+    def _extract(value: dict | None) -> Any:
+        """Return the typed payload of a response value, or None."""
+        if not PowersoftAPI._ok(value):
+            return None
+        data = value.get("data") or {}
         try:
-            return result.get("payload", {}).get("action", {}).get("values", [])
-        except (KeyError, AttributeError):
-            return []
+            key = VALUE_FIELDS[ValueType(data.get("type"))]
+        except ValueError:
+            key = None
+        if key and key in data:
+            return data[key]
+        for key in VALUE_FIELDS.values():  # untyped / unknown type code
+            if key in data:
+                return data[key]
+        return None
 
-    def _check_result_code(self, value: Dict) -> bool:
-        """Check if operation was successful (result code 10)."""
-        return value.get("result") == 10
+    async def _read(self, ids: list[str]) -> list[Any]:
+        """Bulk-read parameters, returning values aligned with ``ids``."""
+        response = await self._am_request(
+            ACTION_READ, [{"id": pid, "single": True} for pid in ids]
+        )
+        by_id = {v.get("id"): v for v in response if isinstance(v, dict) and v.get("id")}
+        out: list[Any] = []
+        for idx, pid in enumerate(ids):
+            value = by_id.get(pid)
+            if value is None and idx < len(response):
+                value = response[idx]
+            out.append(self._extract(value))
+        return out
 
-    async def get_status(self) -> Dict[str, Any]:
-        """Get complete amplifier status for all channels.
-        
-        Returns:
-            Dict with system info and channels data
+    async def _write(self, pid: str, value_type: ValueType, value: Any) -> bool:
+        data = {"type": int(value_type), VALUE_FIELDS[value_type]: value}
+        response = await self._am_request(ACTION_WRITE, [{"id": pid, "data": data}])
+        if response and self._ok(response[0]):
+            return True
+        _LOGGER.warning(
+            "Write to %s failed, result: %s",
+            pid,
+            response[0].get("result") if response else "no response",
+        )
+        return False
+
+    async def _read_optional(self, group: str, ids: list[str]) -> list[Any]:
+        """Read parameters that may not exist on every model.
+
+        The group is probed once; if nothing comes back it is skipped on
+        subsequent polls so it cannot break or slow down the main update.
         """
-        status_data = {
-            "system": {
-                "model": "Quattrocanali 8804 DSP",
-                "firmware": "Unknown",
-                "temperature": None,
-                "power_state": "on",
-                "serial": "Unknown",
-            },
-            "channels": {"channels": []},
+        if self._optional_supported.get(group) is False:
+            return [None] * len(ids)
+        try:
+            values = await self._read(ids)
+        except PowersoftError as err:
+            if group not in self._optional_supported:
+                _LOGGER.debug("Optional group %s not available: %s", group, err)
+                self._optional_supported[group] = False
+            return [None] * len(ids)
+        if group not in self._optional_supported:
+            self._optional_supported[group] = any(v is not None for v in values)
+            if not self._optional_supported[group]:
+                _LOGGER.info("Amplifier does not expose %s parameters", group)
+        return values
+
+    @classmethod
+    def gain_to_db(cls, normalized: float) -> float:
+        return round(normalized * (cls.GAIN_MAX_DB - cls.GAIN_MIN_DB) + cls.GAIN_MIN_DB, 2)
+
+    @classmethod
+    def db_to_gain(cls, gain_db: float) -> float:
+        value = (gain_db - cls.GAIN_MIN_DB) / (cls.GAIN_MAX_DB - cls.GAIN_MIN_DB)
+        return max(0.0, min(1.0, value))
+
+    # ------------------------------------------------------------------ status
+
+    async def get_device_info(self) -> dict[str, Any]:
+        """Read model name, firmware, serial number and channel count."""
+        name, firmware, serial, channels = await self._read(
+            [self.DEVICE_NAME, self.FIRMWARE, self.SERIAL, self.CHANNEL_COUNT]
+        )
+        if all(v is None for v in (name, firmware, serial)):
+            raise PowersoftConnectionError("Amplifier returned no identity data")
+        try:
+            num_channels = int(str(channels)) if channels is not None else None
+        except ValueError:
+            num_channels = None
+        if num_channels is not None and not 1 <= num_channels <= 16:
+            num_channels = None
+        return {
+            "model": str(name).strip() if name else None,
+            "firmware": str(firmware).strip() if firmware else None,
+            "serial": str(serial).strip() if serial not in (None, "") else None,
+            "channels": num_channels,
         }
 
-        try:
-            # Build bulk read request for all channel parameters
-            read_values = []
+    async def test_connection(self) -> dict[str, Any]:
+        """Return the device info, raising PowersoftError if unreachable."""
+        return await self.get_device_info()
 
-            # Read mute and gain for all channels
-            for ch in range(self.num_channels):
-                read_values.extend([
-                    {
-                        "id": self.OUTPUT_MUTE.format(ch=ch),
-                        "single": True,
-                    },
-                    {
-                        "id": self.OUTPUT_GAIN.format(ch=ch),
-                        "single": True,
-                    },
-                ])
+    async def get_status(self) -> dict[str, Any]:
+        """Return the controllable state of the amplifier.
 
-            # Also read current snapshot and standby state
-            read_values.extend([
-                {
-                    "id": self.SNAPSHOT_CURRENT,
-                    "single": True,
-                },
-                {
-                    "id": self.STANDBY_STATE,
-                    "single": True,
-                }
-            ])
+        Raises PowersoftError if the amplifier cannot be reached, so the
+        coordinator marks the entities unavailable instead of showing stale or
+        made-up values. Live meters come from Socket.IO (powersoft_live).
+        """
+        channels = range(self.num_channels)
 
-            # Make single bulk request
-            result = await self._am_request("READ", read_values)
-            response_values = self._parse_response_values(result)
+        # Core parameters (verified on Quattrocanali 4804 DSP): must succeed.
+        core_ids = [self.SNAPSHOT_CURRENT, self.STANDBY_STATE]
+        for ch in channels:
+            core_ids += [
+                self.OUTPUT_MUTE.format(ch=ch),
+                self.OUTPUT_GAIN.format(ch=ch),
+                self.SPEAKER_NAME.format(ch=ch),
+            ]
+        core = await self._read(core_ids)
 
-            # Parse responses - format: [Ch0 Mute, Ch0 Gain, Ch1 Mute, Ch1 Gain, ...]
-            for ch in range(self.num_channels):
-                mute_idx = ch * 2
-                gain_idx = ch * 2 + 1
+        # Optional parameters: probed once, skipped if the model lacks them.
+        dsp = await self._read_optional(
+            "dsp",
+            [
+                pid.format(ch=ch)
+                for ch in channels
+                for pid in (self.OUTPUT_POLARITY, self.OUTPUT_DELAY, self.INPUT_MUTE)
+            ],
+        )
 
-                channel_data = {
-                    "number": ch + 1,  # Display as 1-based
-                    "gain": -80.0,
-                    "mute": False,
-                    "polarity": "normal",
-                    "delay": 0.0,
-                    "voltage": None,
-                    "current": None,
-                    "power": None,
-                    "impedance": None,
-                    "signal_present": False,
-                    "clip": False,
-                }
+        snapshot, standby = core[0], normalize_standby(core[1])
+        status: dict[str, Any] = {
+            "system": {
+                "standby": standby,
+                "power_state": None if standby is None else ("standby" if standby else "on"),
+                "current_snapshot": snapshot,
+            },
+            "channels": {},
+        }
+        for ch in channels:
+            mute, gain, speaker = core[2 + ch * 3: 5 + ch * 3]
+            polarity, delay, input_mute = dsp[ch * 3: 3 + ch * 3]
+            status["channels"][ch + 1] = {
+                "number": ch + 1,
+                "mute": bool(mute) if mute is not None else None,
+                "gain": self.gain_to_db(gain) if gain is not None else None,
+                "speaker": str(speaker).strip() or None if speaker else None,
+                "polarity_inverted": bool(polarity) if polarity is not None else None,
+                "delay": _as_float(delay),
+                "input_mute": bool(input_mute) if input_mute is not None else None,
+            }
+        return status
 
-                # Extract mute status
-                if mute_idx < len(response_values):
-                    mute_data = response_values[mute_idx].get("data", {})
-                    channel_data["mute"] = mute_data.get("boolValue", False)
-
-                # Extract gain and convert to dB
-                if gain_idx < len(response_values):
-                    gain_data = response_values[gain_idx].get("data", {})
-                    if "floatValue" in gain_data:
-                        # Powersoft uses 0.0-1.0 range, convert to -80dB to 0dB
-                        normalized = gain_data["floatValue"]
-                        channel_data["gain"] = (normalized * 80) - 80
-
-                status_data["channels"]["channels"].append(channel_data)
-
-            # Extract snapshot info (second to last value)
-            if len(response_values) > (self.num_channels * 2):
-                snapshot_data = response_values[-2].get("data", {})
-                status_data["system"]["current_snapshot"] = snapshot_data.get(
-                    "stringValue", "Unknown"
-                )
-            
-            # Extract standby state (last value)
-            # Note: standby=True means amplifier is in standby (OFF)
-            #       standby=False means amplifier is running (ON)
-            if len(response_values) > (self.num_channels * 2 + 1):
-                standby_data = response_values[-1].get("data", {})
-                is_standby = standby_data.get("boolValue", False)
-                status_data["system"]["power_state"] = "standby" if is_standby else "on"
-
-            _LOGGER.info(
-                "Status retrieved: %d channels", len(status_data["channels"]["channels"])
-            )
-
-        except Exception as err:
-            _LOGGER.error("Failed to get status: %s", err, exc_info=True)
-            # Return default structure even on error
-            for ch in range(1, self.num_channels + 1):
-                if len(status_data["channels"]["channels"]) < self.num_channels:
-                    status_data["channels"]["channels"].append({
-                        "number": ch,
-                        "gain": -80.0,
-                        "mute": False,
-                        "polarity": "normal",
-                        "delay": 0.0,
-                        "voltage": None,
-                        "current": None,
-                        "power": None,
-                        "impedance": None,
-                        "signal_present": False,
-                        "clip": False,
-                    })
-
-        return status_data
+    # ------------------------------------------------------------------ control
 
     async def set_mute(self, channel: int, mute: bool) -> bool:
-        """Set mute state for a channel.
-        
-        Args:
-            channel: Channel number (1-based, 1-4)
-            mute: True to mute, False to unmute
-            
-        Returns:
-            True if successful
-        """
-        try:
-            ch_index = channel - 1
-            values = [
-                {
-                    "id": self.OUTPUT_MUTE.format(ch=ch_index),
-                    "data": {"type": "BOOL", "boolValue": mute},
-                }
-            ]
+        """Mute (True) or unmute (False) an output channel (1-based)."""
+        return await self._write(
+            self.OUTPUT_MUTE.format(ch=channel - 1), ValueType.BOOL, bool(mute)
+        )
 
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Channel %d mute set to %s", channel, mute)
-                return True
-
-            _LOGGER.warning(
-                "Mute command failed for channel %d, result: %s",
-                channel,
-                response_values[0].get("result") if response_values else "no response",
-            )
-            return False
-
-        except Exception as e:
-            _LOGGER.error(
-                "Failed to set mute on channel %d: %s", channel, e, exc_info=True
-            )
-            return False
+    async def set_input_mute(self, channel: int, mute: bool) -> bool:
+        """Mute (True) or unmute (False) an input channel (1-based)."""
+        return await self._write(
+            self.INPUT_MUTE.format(ch=channel - 1), ValueType.BOOL, bool(mute)
+        )
 
     async def set_gain(self, channel: int, gain_db: float) -> bool:
-        """Set gain for a channel.
-        
-        Args:
-            channel: Channel number (1-based, 1-4)
-            gain_db: Gain in dB (typically -80 to 0)
-            
-        Returns:
-            True if successful
-        """
-        try:
-            ch_index = channel - 1
-
-            # Convert dB to normalized 0-1 range
-            # -80dB = 0.0, 0dB = 1.0
-            normalized_gain = (gain_db + 80) / 80
-            normalized_gain = max(0.0, min(1.0, normalized_gain))
-
-            values = [
-                {
-                    "id": self.OUTPUT_GAIN.format(ch=ch_index),
-                    "data": {"type": "FLOAT", "floatValue": normalized_gain},
-                }
-            ]
-
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info(
-                    "Channel %d gain set to %.1f dB (%.3f)",
-                    channel,
-                    gain_db,
-                    normalized_gain,
-                )
-                return True
-
-            return False
-
-        except Exception as e:
-            _LOGGER.error(
-                "Failed to set gain on channel %d: %s", channel, e, exc_info=True
-            )
-            return False
+        """Set the output gain in dB (-80..0) of a channel (1-based)."""
+        return await self._write(
+            self.OUTPUT_GAIN.format(ch=channel - 1),
+            ValueType.FLOAT,
+            self.db_to_gain(gain_db),
+        )
 
     async def set_polarity(self, channel: int, inverted: bool) -> bool:
-        """Set polarity (phase inversion) for a channel.
-        
-        Args:
-            channel: Channel number (1-based, 1-4)
-            inverted: True to invert, False for normal
-            
-        Returns:
-            True if successful
-        """
-        try:
-            ch_index = channel - 1
-            values = [
-                {
-                    "id": self.OUTPUT_POLARITY.format(ch=ch_index),
-                    "data": {"type": "BOOL", "boolValue": inverted},
-                }
-            ]
-
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Channel %d polarity inverted: %s", channel, inverted)
-                return True
-
-            return False
-
-        except Exception as e:
-            _LOGGER.error(
-                "Failed to set polarity on channel %d: %s", channel, e, exc_info=True
-            )
-            return False
+        """Invert (True) or restore (False) the polarity of a channel."""
+        return await self._write(
+            self.OUTPUT_POLARITY.format(ch=channel - 1), ValueType.BOOL, bool(inverted)
+        )
 
     async def set_delay(self, channel: int, delay_ms: float) -> bool:
-        """Set delay for a channel.
-        
-        Args:
-            channel: Channel number (1-based, 1-4)
-            delay_ms: Delay in milliseconds
-            
-        Returns:
-            True if successful
-        """
-        try:
-            ch_index = channel - 1
-            values = [
-                {
-                    "id": self.OUTPUT_DELAY.format(ch=ch_index),
-                    "data": {"type": "FLOAT", "floatValue": delay_ms},
-                }
-            ]
+        """Set the output delay in milliseconds of a channel."""
+        return await self._write(
+            self.OUTPUT_DELAY.format(ch=channel - 1), ValueType.FLOAT, float(delay_ms)
+        )
 
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Channel %d delay set to %.1f ms", channel, delay_ms)
-                return True
-
-            return False
-
-        except Exception as e:
-            _LOGGER.error(
-                "Failed to set delay on channel %d: %s", channel, e, exc_info=True
-            )
-            return False
-
-    async def set_matrix_gain(
-        self, input_ch: int, output_ch: int, gain: float
-    ) -> bool:
-        """Set input matrix routing gain.
-        
-        Args:
-            input_ch: Input channel (1-based, 1-4)
-            output_ch: Output channel (1-based, 1-4)
-            gain: Gain value (0.0-1.0, where 1.0 = 0dB)
-            
-        Returns:
-            True if successful
-        """
-        try:
-            in_index = input_ch - 1
-            out_index = output_ch - 1
-
-            values = [
-                {
-                    "id": self.MATRIX_GAIN.format(in_ch=in_index, out_ch=out_index),
-                    "data": {"type": "FLOAT", "floatValue": gain},
-                }
-            ]
-
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info(
-                    "Matrix gain Input %d → Output %d set to %.2f",
-                    input_ch,
-                    output_ch,
-                    gain,
-                )
-                return True
-
-            return False
-
-        except Exception as e:
-            _LOGGER.error("Failed to set matrix gain: %s", e, exc_info=True)
-            return False
+    async def set_matrix_gain(self, input_ch: int, output_ch: int, gain: float) -> bool:
+        """Set the input-matrix routing gain (0.0..1.0, 1.0 = 0 dB)."""
+        return await self._write(
+            self.MATRIX_GAIN.format(in_ch=input_ch - 1, out_ch=output_ch - 1),
+            ValueType.FLOAT,
+            max(0.0, min(1.0, float(gain))),
+        )
 
     async def load_snapshot(self, snapshot_id: int) -> bool:
-        """Load a snapshot/preset.
-        
-        Args:
-            snapshot_id: Snapshot slot ID
-            
-        Returns:
-            True if successful
+        """Recall a snapshot / preset slot."""
+        return await self._write(self.SNAPSHOT_LOAD, ValueType.INT, int(snapshot_id))
+
+    async def set_standby(self, standby: bool) -> bool:
+        """Enter (True) or leave (False) standby.
+
+        Some firmwares (e.g. Quattrocanali 4804 DSP) store standby as an INT,
+        so fall back to 0/1 if the BOOL write is rejected.
         """
-        try:
-            values = [
-                {
-                    "id": self.SNAPSHOT_LOAD,
-                    "data": {"type": "INT", "intValue": snapshot_id},
-                }
-            ]
-
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Loaded snapshot %d", snapshot_id)
-                return True
-
-            return False
-
-        except Exception as e:
-            _LOGGER.error("Failed to load snapshot: %s", e, exc_info=True)
-            return False
-
-    async def get_current_snapshot(self) -> str:
-        """Get currently loaded snapshot ID.
-        
-        Returns:
-            Snapshot ID as string, or "Unknown" on error
-        """
-        try:
-            values = [{"id": self.SNAPSHOT_CURRENT, "single": True}]
-
-            result = await self._am_request("READ", values)
-            response_values = self._parse_response_values(result)
-
-            if response_values:
-                snapshot_data = response_values[0].get("data", {})
-                return snapshot_data.get("stringValue", "Unknown")
-
-            return "Unknown"
-
-        except Exception as e:
-            _LOGGER.error("Failed to get current snapshot: %s", e, exc_info=True)
-            return "Unknown"
+        if await self._write(self.STANDBY_STATE, ValueType.BOOL, bool(standby)):
+            return True
+        return await self._write(self.STANDBY_STATE, ValueType.INT, 1 if standby else 0)
 
     async def power_on(self) -> bool:
-        """Turn on the amplifier (exit standby mode).
-        
-        Note: Standby value False = amplifier ON
-        
-        Returns:
-            True if successful
-        """
-        try:
-            values = [
-                {
-                    "id": self.STANDBY_STATE,
-                    "data": {"type": "BOOL", "boolValue": False},  # False = ON
-                }
-            ]
-            
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-            
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Amplifier powered ON (standby disabled)")
-                return True
-            
-            _LOGGER.warning("Power on command failed, result: %s", response_values)
-            return False
-
-        except Exception as e:
-            _LOGGER.error("Failed to power on: %s", e, exc_info=True)
-            return False
+        """Turn the amplifier on (leave standby)."""
+        return await self.set_standby(False)
 
     async def power_off(self) -> bool:
-        """Turn off the amplifier (enter standby mode).
-        
-        Note: Standby value True = amplifier in STANDBY
-        
-        Returns:
-            True if successful
-        """
-        try:
-            values = [
-                {
-                    "id": self.STANDBY_STATE,
-                    "data": {"type": "BOOL", "boolValue": True},  # True = STANDBY
-                }
-            ]
-            
-            result = await self._am_request("WRITE", values)
-            response_values = self._parse_response_values(result)
-            
-            if response_values and self._check_result_code(response_values[0]):
-                _LOGGER.info("Amplifier powered OFF (standby enabled)")
-                return True
-            
-            _LOGGER.warning("Power off command failed, result: %s", response_values)
-            return False
+        """Put the amplifier in standby."""
+        return await self.set_standby(True)
 
-        except Exception as e:
-            _LOGGER.error("Failed to power off: %s", e, exc_info=True)
+
+def normalize_standby(raw: Any) -> bool | None:
+    """Return True when in standby; the value may be BOOL, INT or STRING."""
+    if raw is None:
+        return None
+    if isinstance(raw, (bool, int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        text = raw.strip().lower()
+        if text in {"true", "1", "on", "standby"}:
+            return True
+        if text in {"false", "0", "off"}:
             return False
+    return None
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None

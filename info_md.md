@@ -4,8 +4,9 @@ Integración para Home Assistant que permite monitorizar y controlar amplificado
 
 ## Características
 
-- Control de volumen (ganancia) por canal
-- Mute/Unmute de canales individuales
+- Encendido / standby
+- Mute, ganancia, delay y polaridad por canal
+- Carga de snapshots (presets)
 - Monitorización en tiempo real de temperatura, voltaje, corriente y potencia
 - Control de encendido/standby
 - Soporte para múltiples canales
